@@ -1,4 +1,4 @@
-# siftr 2.0
+# siftr 2.0 (IPv4 only)
 This is my customized code to the stock freebsd/siftr, full name "Statistical Information For TCP Research".
 
 Its original FreeBSD Manual Page can be found here:
