@@ -82,8 +82,8 @@
  * The version number X.Y refers:
  * X is the major version number and Y has backward compatible changes
  */
-#define MODVERSION	__CONCAT(2,0)
-#define MODVERSION_STR	__XSTRING(2) "." __XSTRING(0)
+#define MODVERSION	__CONCAT(2,1)
+#define MODVERSION_STR	__XSTRING(2) "." __XSTRING(1)
 #define SYS_NAME "FreeBSD"
 
 enum {
@@ -173,7 +173,8 @@ struct flow_info
 	u_char		snd_scale;		/* Window scaling for snd window. */
 	u_char		rcv_scale;		/* Window scaling for recv window. */
 
-	uint32_t	nrecord;		/* num of records in the flow */
+	uint32_t	nrecord;		/* num of records in the log */
+	uint32_t	ntrans;			/* num of all transfers (in/out) */
 };
 
 /* siftr2_hashnode */
@@ -318,11 +319,13 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	hash_node = siftr_find_flow(counter_list, pkt_node->flowid);
 
 	if (hash_node == NULL) {
-		return 0;
+		panic("%s: hash_node == NULL", __func__);
 	}
 
-	/* Check if we have a variance of the cwnd to record. */
-	if (siftr_cwnd_filter && hash_node != NULL) {
+	hash_node->const_info.ntrans++;
+
+	if (siftr_cwnd_filter) {
+		/* Check if we have a variance of the cwnd to record. */
 		if (hash_node->last_cwnd == pkt_node->snd_cwnd) {
 			if (siftr_pkts_per_log > 1) {
 				/*
@@ -348,6 +351,12 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 		} else {
 			hash_node->last_cwnd = pkt_node->snd_cwnd;
 			hash_node->counter = 0;
+		}
+	} else if (siftr_pkts_per_log > 1) {
+		hash_node->counter = (hash_node->counter + 1) %
+				     siftr_pkts_per_log;
+		if (hash_node->counter > 0) {
+			return 0;
 		}
 	}
 
@@ -692,6 +701,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		info.snd_scale = tp->snd_scale;
 		info.rcv_scale = tp->rcv_scale;
 		info.nrecord = 0;
+		info.ntrans = 0;
 
 		hash_node = siftr_new_hash_node(info);
 	}
@@ -939,13 +949,13 @@ siftr_manage_ops(uint8_t action)
 		qsort(arr, global_flow_cnt, sizeof(arr[0]), compare_nrecord);
 		sbuf_printf(s, "flow_list=");
 		for (j = 0; j < global_flow_cnt; j++) {
-			sbuf_printf(s, "%u,%s,%hu,%s,%hu,%u,%u,%u,%u,%u;",
+			sbuf_printf(s, "%u,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u;",
 					arr[j].key,
 					arr[j].laddr, arr[j].lport,
 					arr[j].faddr, arr[j].fport,
 					arr[j].mss, arr[j].sack_enabled,
 					arr[j].snd_scale, arr[j].rcv_scale,
-					arr[j].nrecord);
+					arr[j].nrecord, arr[j].ntrans);
 		}
 
 		sbuf_printf(s, "\n");
