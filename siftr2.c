@@ -152,6 +152,10 @@ struct pkt_node {
 	tcp_seq			th_ack;
 	/* the length of TCP segment payload in bytes */
 	uint32_t		data_sz;
+	/* the default inflight pipe size in bytes with V_tcp_do_newsack == 1 */
+	uint32_t		def_pipe;
+	/* the old inflight pipe size in bytes with V_tcp_do_newsack == 0 */
+	uint32_t		old_pipe;
 	/* Link to next pkt_node in the list. */
 	STAILQ_ENTRY(pkt_node)	nodes;
 };
@@ -366,7 +370,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
 	    "%c,%jd.%06ld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-	    "%u,%u\n",
+	    "%u,%u,%u,%u\n",
 	    direction[pkt_node->direction],
 	    (intmax_t)pkt_node->tval.tv_sec,
 	    pkt_node->tval.tv_usec,
@@ -388,7 +392,9 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	    pkt_node->t_segqlen,
 	    pkt_node->th_seq,
 	    pkt_node->th_ack,
-	    pkt_node->data_sz);
+	    pkt_node->data_sz,
+	    pkt_node->def_pipe,
+	    pkt_node->old_pipe);
 
 	if (ret_sz >= MAX_LOG_MSG_LEN) {
 		panic("%s: record size %d larger than max record size %d",
@@ -582,6 +588,9 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->rcv_buf_cc = sbused(&inp->inp_socket->so_rcv);
 	pn->sent_inflight_bytes = tp->snd_max - tp->snd_una;
 	pn->t_segqlen = tp->t_segqlen;
+	pn->def_pipe = tcp_compute_pipe(tp);
+	pn->old_pipe = tp->snd_max - tp->t_ccv.curack;
+
 
 	/* We've finished accessing the tcb so release the lock. */
 	if (inp_locally_locked)
