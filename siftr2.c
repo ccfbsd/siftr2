@@ -565,8 +565,10 @@ siftr_get_flowid(struct inpcb *inp, uint32_t *phashtype)
 
 static inline void
 siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
-	       int dir, int inp_locally_locked)
+	       int dir, int inp_locally_locked, struct ip *ip, uint32_t id)
 {
+	struct tcphdr *th = (struct tcphdr *)((caddr_t)ip + (ip->ip_hl << 2));
+
 	pn->snd_cwnd = tp->snd_cwnd;
 	pn->snd_wnd = tp->snd_wnd;
 	pn->rcv_wnd = tp->rcv_wnd;
@@ -588,6 +590,10 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 		INP_RUNLOCK(inp);
 
 	pn->direction = (dir == PFIL_IN ? DIR_IN : DIR_OUT);
+	pn->flowid = id;
+	pn->th_seq = ntohl(th->th_seq);
+	pn->th_ack = ntohl(th->th_ack);
+	pn->data_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
 
 	/*
 	 * Significantly more accurate than using getmicrotime(), but slower!
@@ -613,7 +619,6 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	struct ip *ip;
 	struct tcphdr *th;
 	struct tcpcb *tp;
-	unsigned int ip_hl;
 	int inp_locally_locked, dir;
 	uint32_t hash_id, hash_type;
 	struct listhead *counter_list;
@@ -638,8 +643,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	 * in the IP packet. ip->ip_hl gives the ip header length
 	 * in 4-byte words, so multiply it to get the size in bytes.
 	 */
-	ip_hl = (ip->ip_hl << 2);
-	th = (struct tcphdr *)((caddr_t)ip + ip_hl);
+	th = (struct tcphdr *)((caddr_t)ip + (ip->ip_hl << 2));
 
 	/*
 	 * Only pkts selected by the tcp port filter
@@ -717,12 +721,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		goto inp_unlock;
 	}
 
-	pn->flowid = hash_id;
-	pn->th_seq = ntohl(th->th_seq);
-	pn->th_ack = ntohl(th->th_ack);
-	pn->data_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
-
-	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked);
+	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked, ip, hash_id);
 
 	mtx_lock(&siftr_pkt_queue_mtx);
 	STAILQ_INSERT_TAIL(&pkt_queue, pn, nodes);
