@@ -1,7 +1,6 @@
 # $FreeBSD$
 
-.PATH:  /usr/src/sys/netinet
 KMOD=	siftr2
-SRCS=	siftr2.c opt_kern_tls.h
+SRCS=	siftr2.c
 
 .include <bsd.kmod.mk>
