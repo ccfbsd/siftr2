@@ -575,7 +575,8 @@ siftr_get_flowid(struct inpcb *inp, uint32_t *phashtype)
 
 static inline void
 siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
-	       int dir, int inp_locally_locked, struct ip *ip, uint32_t id)
+	       int dir, int inp_locally_locked, struct ip *ip,
+	       struct flow_hash_node *hash_node)
 {
 	struct tcphdr *th = (struct tcphdr *)((caddr_t)ip + (ip->ip_hl << 2));
 
@@ -585,7 +586,13 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->t_flags2 = tp->t_flags2;
 	pn->snd_ssthresh = tp->snd_ssthresh;
 	pn->conn_state = tp->t_state;
-	pn->srtt = ((uint64_t)tp->t_srtt * tick) >> TCP_RTT_SHIFT;
+
+	if (hash_node->const_info.stack_type == FBSD) {
+		pn->srtt = ((uint64_t)tp->t_srtt * tick) >> TCP_RTT_SHIFT;
+	} else if (hash_node->const_info.stack_type == RACK) {
+		struct tcp_rack *rack = (struct tcp_rack *)tp->t_fb_ptr;
+		pn->srtt = rack->rc_rack_rtt;
+	}
 	pn->t_flags = tp->t_flags;
 	pn->rto = tp->t_rxtcur * tick;
 	pn->snd_buf_hiwater = inp->inp_socket->so_snd.sb_hiwat;
@@ -600,7 +607,7 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 		INP_RUNLOCK(inp);
 
 	pn->direction = (dir == PFIL_IN ? DIR_IN : DIR_OUT);
-	pn->flowid = id;
+	pn->flowid = hash_node->const_info.key;
 	pn->th_seq = ntohl(th->th_seq);
 	pn->th_ack = ntohl(th->th_ack);
 	pn->data_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
@@ -737,7 +744,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		goto inp_unlock;
 	}
 
-	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked, ip, hash_id);
+	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked, ip, hash_node);
 
 	mtx_lock(&siftr_pkt_queue_mtx);
 	STAILQ_INSERT_TAIL(&pkt_queue, pn, nodes);
