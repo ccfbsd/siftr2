@@ -59,6 +59,7 @@
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/sysctl.h>
+#include <sys/tim_filter.h>
 #include <sys/unistd.h>
 
 #include <net/if.h>
@@ -75,6 +76,11 @@
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
 #include <netinet/tcp_var.h>
+#include <netinet/tcp_hpts.h>
+#include <netinet/cc/cc.h>
+#include <netinet/cc/cc_newreno.h>
+#include <netinet/tcp_stacks/sack_filter.h>
+#include <netinet/tcp_stacks/tcp_rack.h>
 
 #include <machine/in_cksum.h>
 
@@ -82,8 +88,8 @@
  * The version number X.Y refers:
  * X is the major version number and Y has backward compatible changes
  */
-#define MODVERSION	__CONCAT(2,1)
-#define MODVERSION_STR	__XSTRING(2) "." __XSTRING(1)
+#define MODVERSION	__CONCAT(2,2)
+#define MODVERSION_STR	__XSTRING(2) "." __XSTRING(2)
 #define SYS_NAME "FreeBSD"
 
 enum {
@@ -168,6 +174,10 @@ struct flow_info
 	uint32_t	flowtype;		/* Flow type for the connection. */
 
 	/* infrequently change info */
+	enum {
+		FBSD = 0,
+		RACK = 1,
+	}		stack_type;
 	uint32_t	mss;			/* Max Segment Size (bytes). */
 	u_char		sack_enabled;		/* Is SACK enabled? */
 	u_char		snd_scale;		/* Window scaling for snd window. */
@@ -700,6 +710,12 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		info.ipver = INP_IPV4;
 		info.flowtype = hash_type;
 
+		/* short hand for stack type check */
+		if (tp->t_fb->tfb_tcp_block_name[0] == 'f') {
+			info.stack_type = FBSD;
+		} else if (tp->t_fb->tfb_tcp_block_name[0] == 'r') {
+			info.stack_type = RACK;
+		}
 		info.mss = tcp_maxseg(tp);
 		info.sack_enabled = (tp->t_flags & TF_SACK_PERMIT) != 0;
 		info.snd_scale = tp->snd_scale;
@@ -948,10 +964,11 @@ siftr_manage_ops(uint8_t action)
 		qsort(arr, global_flow_cnt, sizeof(arr[0]), compare_nrecord);
 		sbuf_printf(s, "flow_list=");
 		for (j = 0; j < global_flow_cnt; j++) {
-			sbuf_printf(s, "%u,%s,%hu,%s,%hu,%u,%u,%u,%u,%u,%u;",
+			sbuf_printf(s, "%u,%s,%hu,%s,%hu,%d,%u,%u,%u,%u,%u,%u;",
 					arr[j].key,
 					arr[j].laddr, arr[j].lport,
 					arr[j].faddr, arr[j].fport,
+					arr[j].stack_type,
 					arr[j].mss, arr[j].sack_enabled,
 					arr[j].snd_scale, arr[j].rcv_scale,
 					arr[j].nrecord, arr[j].ntrans);
