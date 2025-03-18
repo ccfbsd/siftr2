@@ -148,7 +148,7 @@ struct pkt_node {
 	/* Current num bytes in the receive socket buffer. */
 	u_int			rcv_buf_cc;
 	/* Number of bytes inflight that we are waiting on ACKs for. */
-	u_int			sent_inflight_bytes;
+	uint32_t		pipe;
 	/* Number of segments currently in the reassembly queue. */
 	int			t_segqlen;
 	/* Flow type for the connection. */
@@ -394,7 +394,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	    pkt_node->snd_buf_cc,
 	    pkt_node->rcv_buf_hiwater,
 	    pkt_node->rcv_buf_cc,
-	    pkt_node->sent_inflight_bytes,
+	    pkt_node->pipe,
 	    pkt_node->t_segqlen,
 	    pkt_node->th_seq,
 	    pkt_node->th_ack,
@@ -599,7 +599,7 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->snd_buf_cc = sbused(&inp->inp_socket->so_snd);
 	pn->rcv_buf_hiwater = inp->inp_socket->so_rcv.sb_hiwat;
 	pn->rcv_buf_cc = sbused(&inp->inp_socket->so_rcv);
-	pn->sent_inflight_bytes = tp->snd_max - tp->snd_una;
+	pn->pipe = tcp_compute_pipe(tp);
 	pn->t_segqlen = tp->t_segqlen;
 
 	/* We've finished accessing the tcb so release the lock. */
