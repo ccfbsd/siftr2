@@ -379,7 +379,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 	/* Construct a log message.
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
-	    "%c,%jd.%06ld,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+	    "%c,%jd.%06ld,%08x,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
 	    "%u,%u\n",
 	    direction[pkt_node->direction],
 	    (intmax_t)pkt_node->tval.tv_sec,
@@ -981,7 +981,7 @@ siftr_manage_ops(uint8_t action)
 		qsort(arr, global_flow_cnt, sizeof(arr[0]), compare_nrecord);
 		sbuf_printf(s, "flow_list=");
 		for (j = 0; j < global_flow_cnt; j++) {
-			sbuf_printf(s, "%u,%s,%hu,%s,%hu,%d,%d,%u,%u,%u,%u,%u,%u;",
+			sbuf_printf(s, "%08x,%s,%hu,%s,%hu,%d,%d,%u,%u,%u,%u,%u,%u;",
 					arr[j].key,
 					arr[j].laddr, arr[j].lport,
 					arr[j].faddr, arr[j].fport,
