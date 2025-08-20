@@ -213,6 +213,7 @@ static uint32_t max_tmp_qsize = 0;
 static uint32_t max_str_size = 0;
 static uint32_t alq_getn_fail_cnt = 0;
 static uint32_t global_flow_cnt = 0;
+static uint32_t gen_flowid_cnt = 0;	// count of generating flowid
 
 static char siftr_logfile[PATH_MAX] = "/var/log/siftr2.log";
 static char siftr_logfile_shadow[PATH_MAX] = "/var/log/siftr2.log";
@@ -568,6 +569,7 @@ static inline uint32_t
 siftr_get_flowid(struct inpcb *inp, uint32_t *phashtype)
 {
 	if (inp->inp_flowid == 0) {
+		gen_flowid_cnt++;
 		return fib4_calc_packet_hash(inp->inp_laddr, inp->inp_faddr,
 					     inp->inp_lport, inp->inp_fport,
 					     IPPROTO_TCP, phashtype);
@@ -892,7 +894,8 @@ siftr_manage_ops(uint8_t action)
 
 		siftr_exit_pkt_manager_thread = 0;
 		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt =
-			max_str_size = max_tmp_qsize = global_flow_cnt = 0;
+			max_str_size = max_tmp_qsize = global_flow_cnt =
+			gen_flowid_cnt = 0;
 
 		kthread_add(&siftr_pkt_manager_thread, NULL, NULL,
 		    &siftr_pkt_manager_thr, RFNOWAIT, 0,
@@ -946,11 +949,11 @@ siftr_manage_ops(uint8_t action)
 		    "disable_time_secs=%jd\tdisable_time_usecs=%06ld\t"
 		    "global_flow_cnt=%u\t"
 		    "max_tmp_qsize=%u\tavg_tmp_qsize=%ju\tmax_str_size=%u\t"
-		    "alq_getn_fail_cnt=%u\t",
+		    "alq_getn_fail_cnt=%u\tgen_flowid_cnt=%u\t",
 		    (intmax_t)tval.tv_sec, tval.tv_usec,
 		    global_flow_cnt, max_tmp_qsize,
 		    (uintmax_t)(total_tmp_qsize / tmp_q_usecnt),
-		    max_str_size, alq_getn_fail_cnt);
+		    max_str_size, alq_getn_fail_cnt, gen_flowid_cnt);
 
 		/* Create an array to store all flows' keys and records. */
 		arr = malloc(sizeof(struct flow_info) * global_flow_cnt,
@@ -1004,7 +1007,8 @@ siftr_manage_ops(uint8_t action)
 		alq_close(siftr_alq);
 		siftr_alq = NULL;
 		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt =
-			max_str_size = max_tmp_qsize = global_flow_cnt = 0;
+			max_str_size = max_tmp_qsize = global_flow_cnt =
+			gen_flowid_cnt = 0;
 		free(arr, M_SIFTR_FLOW_INFO);
 	} else
 		error = EINVAL;
