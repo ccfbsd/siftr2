@@ -41,7 +41,6 @@
  ******************************************************/
 
 #include <sys/param.h>
-#include <sys/alq.h>
 #include <sys/errno.h>
 #include <sys/eventhandler.h>
 #include <sys/hash.h>
@@ -61,6 +60,8 @@
 #include <sys/sysctl.h>
 #include <sys/tim_filter.h>
 #include <sys/unistd.h>
+
+#include <machine/atomic.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
@@ -94,19 +95,18 @@
 
 enum {
 	HOOK = 0, UNHOOK = 1, SIFTR_EXPECTED_MAX_TCP_FLOWS = 65536,
-	SIFTR_DISABLE = 0, SIFTR_ENABLE = 1,
-	SIFTR_LOG_FILE_MODE = 0644, SIFTR_IPMODE = 4, MAX_LOG_BATCH_SIZE = 3,
+	SIFTR_DISABLE = 0, SIFTR_ENABLE = 1, SIFTR_IPMODE = 4,
+	SIFTR_RING_SIZE = 65536,
 	/*
 	 * Hard upper limit on the length of log messages. Bump this up if you
 	 * add new data fields such that the line length could exceed the below
 	 * value.
 	 */
-	MAX_LOG_MSG_LEN = 200, SIFTR_ALQ_BUFLEN = (1000 * MAX_LOG_MSG_LEN),
+	MAX_LOG_MSG_LEN = 200,
 };
 
-static MALLOC_DEFINE(M_SIFTR, "siftr2", "dynamic memory used by SIFTR");
-static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr2_pktnode", "SIFTR pkt_node struct");
-static MALLOC_DEFINE(M_SIFTR_FLOW_INFO, "flow_info", "SIFTR flow_info struct");
+static MALLOC_DEFINE(M_SIFTR, "siftr2", "dynamic memory used by SIFTR2");
+static MALLOC_DEFINE(M_SIFTR_FLOW_INFO, "flow_info", "SIFTR2 flow_info struct");
 static MALLOC_DEFINE(M_SIFTR_HASHNODE, "siftr2_hashnode",
 		     "SIFTR2 flow_hash_node struct");
 
@@ -162,6 +162,80 @@ struct pkt_node {
 	STAILQ_ENTRY(pkt_node)	nodes;
 };
 
+/* --- SPSC lock-free ring for pkt_node entries --- */
+struct spsc_entry {
+	struct pkt_node pn; /* by-value to avoid malloc/free in hook */
+};
+
+struct spsc_ring {
+	struct spsc_entry *buf;
+	uint32_t size;  /* power of two */
+	uint32_t mask;  /* size - 1 */
+	volatile uint32_t head; /* written by producer */
+	volatile uint32_t tail; /* written by consumer */
+};
+
+static struct spsc_ring siftr_ring;
+static uint32_t siftr_ring_drops = 0; /* producer drops when full */
+
+static int
+spsc_ring_init(struct spsc_ring *r, uint32_t size)
+{
+	if ((size & (size - 1)) != 0) {
+		/* must be power of two */
+		return (EINVAL);
+	}
+	/* allocate ring storage */
+	r->buf = mallocarray(size, sizeof(struct spsc_entry), M_SIFTR,
+			M_NOWAIT|M_ZERO);
+	if (r->buf == NULL)
+		return (ENOMEM);
+	r->size = size;
+	r->mask = size - 1;
+	r->head = 0;
+	r->tail = 0;
+	return (0);
+}
+
+static void
+spsc_ring_destroy(struct spsc_ring *r)
+{
+	if (r->buf != NULL) {
+		free(r->buf, M_SIFTR);
+		r->buf = NULL;
+	}
+	r->size = r->mask = r->head = r->tail = 0;
+}
+
+static inline bool
+spsc_enqueue_pkt(struct spsc_ring *r, const struct pkt_node *pn)
+{
+	uint32_t head = r->head;
+	uint32_t next = (head + 1) & r->mask;
+	if (next == atomic_load_acq_32(&r->tail)) {
+		/* ring full */
+		return false;
+	}
+	r->buf[head].pn = *pn; /* by-value copy */
+	/* publish */
+	atomic_store_rel_32(&r->head, next);
+	return true;
+}
+
+static inline bool
+spsc_dequeue_pkt(struct spsc_ring *r, struct pkt_node *out)
+{
+	uint32_t tail = r->tail;
+	if (tail == atomic_load_acq_32(&r->head)) {
+		/* empty */
+		return false;
+	}
+	*out = r->buf[tail].pn;
+	atomic_store_rel_32(&r->tail, (tail + 1) & r->mask);
+	return true;
+}
+/* --- end SPSC ring --- */
+
 struct flow_info
 {
 	/* permanent info */
@@ -206,12 +280,7 @@ static bool     siftr_cwnd_filter = 0;
 static uint16_t siftr_port_filter = 0;
 static uint32_t siftr_pkts_per_log = 1;
 
-static uint32_t tmp_qsize = 0;
-static uint32_t tmp_q_usecnt = 0;
-static uint32_t total_tmp_qsize = 0;
-static uint32_t max_tmp_qsize = 0;
 static uint32_t max_str_size = 0;
-static uint32_t alq_getn_fail_cnt = 0;
 static uint32_t global_flow_cnt = 0;
 static uint32_t gen_flowid_cnt = 0;	// count of generating flowid
 
@@ -220,13 +289,11 @@ static char siftr_logfile_shadow[PATH_MAX] = "/var/log/siftr2.log";
 static u_long siftr_hashmask;
 STAILQ_HEAD(pkthead, pkt_node) pkt_queue = STAILQ_HEAD_INITIALIZER(pkt_queue);
 LIST_HEAD(listhead, flow_hash_node) *counter_hash;
-static int wait_for_pkt;
-static struct alq *siftr_alq = NULL;
-static struct mtx siftr_pkt_queue_mtx;
 static struct mtx siftr_pkt_mgr_mtx;
 static struct thread *siftr_pkt_manager_thr = NULL;
 static char direction[2] = {'i','o'};
 static eventhandler_tag siftr_shutdown_tag;
+static int wait_for_pkt;
 
 /* Required function prototypes. */
 static int siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS);
@@ -419,124 +486,32 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 static void
 siftr_pkt_manager_thread(void *arg)
 {
-	STAILQ_HEAD(pkthead, pkt_node) tmp_pkt_queue =
-	    STAILQ_HEAD_INITIALIZER(tmp_pkt_queue);
-	struct pkt_node *pkt_node;
-	uint8_t draining;
-	struct ale *log_buf;
-	int ret_sz, cnt = 0;
-	char *bufp;
-
-	draining = 2;
+	struct pkt_node pkt;
+	uint8_t draining = 2;
+	int ret_sz;
+	char line[MAX_LOG_MSG_LEN];
 
 	mtx_lock(&siftr_pkt_mgr_mtx);
-
-	/* draining == 0 when queue has been flushed and it's safe to exit. */
 	while (draining) {
-		/*
-		 * Sleep until we are signalled to wake because thread has
-		 * been told to exit or until 1 tick has passed.
-		 */
-		mtx_sleep(&wait_for_pkt, &siftr_pkt_mgr_mtx, PWAIT, "pktwait",
-		    1);
-
-		/* Gain exclusive access to the pkt_node queue. */
-		mtx_lock(&siftr_pkt_queue_mtx);
-
-		/*
-		 * Move pkt_queue to tmp_pkt_queue, which leaves
-		 * pkt_queue empty and ready to receive more pkt_nodes.
-		 */
-		STAILQ_CONCAT(&tmp_pkt_queue, &pkt_queue);
-
-		/*
-		 * We've finished making changes to the list. Unlock it
-		 * so the pfil hooks can continue queuing pkt_nodes.
-		 */
-		mtx_unlock(&siftr_pkt_queue_mtx);
-
-		/*
-		 * We can't hold a mutex whilst calling siftr_process_pkt
-		 * because ALQ might sleep waiting for buffer space.
-		 */
+		/* Sleep briefly or until signaled; allow wakeups from producer */
+		mtx_sleep(&wait_for_pkt, &siftr_pkt_mgr_mtx, PWAIT, "pktwait", 1);
 		mtx_unlock(&siftr_pkt_mgr_mtx);
 
-		/* cui: find the tmp queue size */
-		tmp_qsize = 0;
-
-		while ((pkt_node = STAILQ_FIRST(&tmp_pkt_queue)) != NULL) {
-			log_buf = alq_getn(siftr_alq, MAX_LOG_MSG_LEN *
-						((STAILQ_NEXT(pkt_node, nodes) != NULL) ?
-							MAX_LOG_BATCH_SIZE : 1),
-					   ALQ_WAITOK);
- 
-			if (log_buf != NULL) {
-				log_buf->ae_bytesused = 0;
-				bufp = log_buf->ae_data;
-			} else {
-				/*
-				 * Should only happen if the ALQ is shutting
-				 * down.
-				 */
-				alq_getn_fail_cnt++;
-				bufp = NULL;
-			}
-
-			STAILQ_FOREACH(pkt_node, &tmp_pkt_queue, nodes) {
-				tmp_qsize++;
-				if (log_buf != NULL) {
-					ret_sz = siftr_process_pkt(pkt_node,
-								   bufp);
-					if (max_str_size < ret_sz) {
-						max_str_size = ret_sz;
-					}
-
-					bufp += ret_sz;
-					log_buf->ae_bytesused += ret_sz;
-				}
-				if (++cnt >= MAX_LOG_BATCH_SIZE)
-					break;
-			}
-			if (log_buf != NULL) {
-				alq_post_flags(siftr_alq, log_buf, 0);
-			}
-			for (; cnt > 0; cnt--) {
-				pkt_node = STAILQ_FIRST(&tmp_pkt_queue);
-				STAILQ_REMOVE_HEAD(&tmp_pkt_queue, nodes);
-				free(pkt_node, M_SIFTR_PKTNODE);
+		/* Drain all available packets in the ring */
+		while (spsc_dequeue_pkt(&siftr_ring, &pkt)) {
+			ret_sz = siftr_process_pkt(&pkt, line);
+			/* For now, emit to console; replace with vnode writes if desired */
+			printf("%.*s", ret_sz, line);
+			if (max_str_size < ret_sz) {
+				max_str_size = ret_sz;
 			}
 		}
 
-		if (!STAILQ_EMPTY(&tmp_pkt_queue)) {
-			panic("%s: SIFTR2 tmp_pkt_queue not empty after flush",
-			      __func__);
-		}
-		tmp_q_usecnt++;
-		total_tmp_qsize += tmp_qsize;
-		if (max_tmp_qsize < tmp_qsize) {
-			max_tmp_qsize = tmp_qsize;
-		}
 		mtx_lock(&siftr_pkt_mgr_mtx);
-
-		/*
-		 * If siftr_exit_pkt_manager_thread gets set during the window
-		 * where we are draining the tmp_pkt_queue above, there might
-		 * still be pkts in pkt_queue that need to be drained.
-		 * Allow one further iteration to occur after
-		 * siftr_exit_pkt_manager_thread has been set to ensure
-		 * pkt_queue is completely empty before we kill the thread.
-		 *
-		 * siftr_exit_pkt_manager_thread is set only after the pfil
-		 * hooks have been removed, so only 1 extra iteration
-		 * is needed to drain the queue.
-		 */
 		if (siftr_exit_pkt_manager_thread)
 			draining--;
 	}
-
 	mtx_unlock(&siftr_pkt_mgr_mtx);
-
-	/* Calls wakeup on this thread's struct thread ptr. */
 	kthread_exit();
 }
 
@@ -638,7 +613,7 @@ static pfil_return_t
 siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
     void *ruleset __unused, struct inpcb *inp)
 {
-	struct pkt_node *pn;
+	struct pkt_node pn_local;
 	struct ip *ip;
 	struct tcphdr *th;
 	struct tcpcb *tp;
@@ -749,18 +724,15 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		goto inp_unlock;
 	}
 
-	pn = malloc(sizeof(struct pkt_node), M_SIFTR_PKTNODE, M_NOWAIT|M_ZERO);
-
-	if (pn == NULL) {
-		panic("%s: malloc failed", __func__);
-		goto inp_unlock;
+	bzero(&pn_local, sizeof(pn_local));
+	siftr_siftdata(&pn_local, inp, tp, dir, inp_locally_locked, ip, hash_node);
+	if (!spsc_enqueue_pkt(&siftr_ring, &pn_local)) {
+		/* drop if full */
+		atomic_add_32(&siftr_ring_drops, 1);
+	} else {
+		/* nudge consumer */
+		wakeup(&wait_for_pkt);
 	}
-
-	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked, ip, hash_node);
-
-	mtx_lock(&siftr_pkt_queue_mtx);
-	STAILQ_INSERT_TAIL(&pkt_queue, pn, nodes);
-	mtx_unlock(&siftr_pkt_queue_mtx);
 	goto ret;
 
 inp_unlock:
@@ -814,39 +786,15 @@ siftr_pfil(int action)
 static int
 siftr_sysctl_logfile_name_handler(SYSCTL_HANDLER_ARGS)
 {
-	struct alq *new_alq;
 	int error;
 
 	error = sysctl_handle_string(oidp, arg1, arg2, req);
-
-	/* Check for error or same filename */
-	if (error != 0 || req->newptr == NULL ||
-	    strncmp(siftr_logfile, arg1, arg2) == 0)
-		goto done;
-
-	/* file name changed */
-	error = alq_open(&new_alq, arg1, curthread->td_ucred,
-	    SIFTR_LOG_FILE_MODE, SIFTR_ALQ_BUFLEN, 0);
-	if (error != 0)
-		goto done;
-
-	/*
-	 * If disabled, siftr_alq == NULL so we simply close
-	 * the alq as we've proved it can be opened.
-	 * If enabled, close the existing alq and switch the old
-	 * for the new.
-	 */
-	if (siftr_alq == NULL) {
-		alq_close(new_alq);
-	} else {
-		alq_close(siftr_alq);
-		siftr_alq = new_alq;
-	}
-
-	/* Update filename upon success */
-	strlcpy(siftr_logfile, arg1, arg2);
-done:
-	return (error);
+	if (error != 0 || req->newptr == NULL)
+		return (error);
+	/* Update active filename if changed */
+	if (strncmp(siftr_logfile, arg1, arg2) != 0)
+		strlcpy(siftr_logfile, arg1, arg2);
+	return (0);
 }
 
 static int
@@ -872,7 +820,6 @@ siftr_manage_ops(uint8_t action)
 	struct flow_hash_node *counter, *tmp_counter;
 	struct sbuf *s;
 	int i, j, error;
-	uint32_t bytes_to_write;
 	struct flow_info *arr;
 
 	error = 0;
@@ -883,19 +830,12 @@ siftr_manage_ops(uint8_t action)
 		return (-1);
 
 	if (action == SIFTR_ENABLE && siftr_pkt_manager_thr == NULL) {
-		/*
-		 * Create our alq
-		 * XXX: We should abort if alq_open fails!
-		 */
-		alq_open(&siftr_alq, siftr_logfile, curthread->td_ucred,
-		    SIFTR_LOG_FILE_MODE, SIFTR_ALQ_BUFLEN, 0);
-
-		STAILQ_INIT(&pkt_queue);
+		/* Initialize SPSC ring */
+		if ((error = spsc_ring_init(&siftr_ring, SIFTR_RING_SIZE)) != 0)
+			return (error);
 
 		siftr_exit_pkt_manager_thread = 0;
-		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt =
-			max_str_size = max_tmp_qsize = global_flow_cnt =
-			gen_flowid_cnt = 0;
+		global_flow_cnt = siftr_ring_drops = max_str_size = gen_flowid_cnt = 0;
 
 		kthread_add(&siftr_pkt_manager_thread, NULL, NULL,
 		    &siftr_pkt_manager_thr, RFNOWAIT, 0,
@@ -912,7 +852,7 @@ siftr_manage_ops(uint8_t action)
 		    SYS_NAME, __FreeBSD_version, SIFTR_IPMODE);
 
 		sbuf_finish(s);
-		alq_writen(siftr_alq, sbuf_data(s), sbuf_len(s), ALQ_WAITOK);
+		printf("%s", sbuf_data(s));
 
 	} else if (action == SIFTR_DISABLE && siftr_pkt_manager_thr != NULL) {
 		/*
@@ -948,12 +888,10 @@ siftr_manage_ops(uint8_t action)
 		sbuf_printf(s,
 		    "disable_time_secs=%jd\tdisable_time_usecs=%06ld\t"
 		    "global_flow_cnt=%u\t"
-		    "max_tmp_qsize=%u\tavg_tmp_qsize=%ju\tmax_str_size=%u\t"
-		    "alq_getn_fail_cnt=%u\tgen_flowid_cnt=%u\t",
+		    "ring_drops=%u\tmax_str_size=%u\tgen_flowid_cnt=%u\t",
 		    (intmax_t)tval.tv_sec, tval.tv_usec,
-		    global_flow_cnt, max_tmp_qsize,
-		    (uintmax_t)(total_tmp_qsize / tmp_q_usecnt),
-		    max_str_size, alq_getn_fail_cnt, gen_flowid_cnt);
+		    global_flow_cnt, siftr_ring_drops, max_str_size,
+		    gen_flowid_cnt);
 
 		/* Create an array to store all flows' keys and records. */
 		arr = malloc(sizeof(struct flow_info) * global_flow_cnt,
@@ -996,19 +934,11 @@ siftr_manage_ops(uint8_t action)
 
 		sbuf_printf(s, "\n");
 		sbuf_finish(s);
+		printf("%s", sbuf_data(s));
 
-		i = 0;
-		do {
-			bytes_to_write = min(SIFTR_ALQ_BUFLEN, sbuf_len(s)-i);
-			alq_writen(siftr_alq, sbuf_data(s)+i, bytes_to_write, ALQ_WAITOK);
-			i += bytes_to_write;
-		} while (i < sbuf_len(s));
-
-		alq_close(siftr_alq);
-		siftr_alq = NULL;
-		total_tmp_qsize = alq_getn_fail_cnt = tmp_q_usecnt =
-			max_str_size = max_tmp_qsize = global_flow_cnt =
-			gen_flowid_cnt = 0;
+		/* destroy ring */
+		spsc_ring_destroy(&siftr_ring);
+		global_flow_cnt = siftr_ring_drops = max_str_size = gen_flowid_cnt = 0;
 		free(arr, M_SIFTR_FLOW_INFO);
 	} else
 		error = EINVAL;
@@ -1067,7 +997,6 @@ deinit_siftr(void)
 	EVENTHANDLER_DEREGISTER(shutdown_pre_sync, siftr_shutdown_tag);
 	siftr_manage_ops(SIFTR_DISABLE);
 	hashdestroy(counter_hash, M_SIFTR, siftr_hashmask);
-	mtx_destroy(&siftr_pkt_queue_mtx);
 	mtx_destroy(&siftr_pkt_mgr_mtx);
 
 	return (0);
@@ -1086,7 +1015,6 @@ init_siftr(void)
 	counter_hash = hashinit(SIFTR_EXPECTED_MAX_TCP_FLOWS, M_SIFTR,
 	    &siftr_hashmask);
 
-	mtx_init(&siftr_pkt_queue_mtx, "siftr_pkt_queue_mtx", NULL, MTX_DEF);
 	mtx_init(&siftr_pkt_mgr_mtx, "siftr_pkt_mgr_mtx", NULL, MTX_DEF);
 
 	/* Print message to the user's current terminal. */
@@ -1150,5 +1078,4 @@ static moduledata_t siftr_mod = {
  *          within the same subsystem as defined by param 3
  */
 DECLARE_MODULE(siftr, siftr_mod, SI_SUB_LAST, SI_ORDER_ANY);
-MODULE_DEPEND(siftr, alq, 1, 1, 1);
 MODULE_VERSION(siftr, MODVERSION);
