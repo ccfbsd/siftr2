@@ -94,8 +94,8 @@
 #define SYS_NAME "FreeBSD"
 
 enum {
-	HOOK = 0, UNHOOK = 1, SIFTR_EXPECTED_MAX_TCP_FLOWS = 65536,
-	SIFTR_DISABLE = 0, SIFTR_ENABLE = 1, SIFTR_IPMODE = 4,
+	HOOK = 0, UNHOOK = 1, SIFTR_DISABLE = 0, SIFTR_ENABLE = 1,
+	SIFTR_IPMODE = 4, SIFTR_EXPECTED_MAX_TCP_FLOWS = 65536,
 	SIFTR_RING_SIZE = 65536,
 	/*
 	 * Hard upper limit on the length of log messages. Bump this up if you
@@ -158,8 +158,6 @@ struct pkt_node {
 	tcp_seq			th_ack;
 	/* the length of TCP segment payload in bytes */
 	uint32_t		data_sz;
-	/* Link to next pkt_node in the list. */
-	STAILQ_ENTRY(pkt_node)	nodes;
 };
 
 /* --- SPSC lock-free ring for pkt_node entries --- */
@@ -613,7 +611,6 @@ static pfil_return_t
 siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
     void *ruleset __unused, struct inpcb *inp)
 {
-	struct pkt_node pn_local;
 	struct ip *ip;
 	struct tcphdr *th;
 	struct tcpcb *tp;
@@ -621,6 +618,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	uint32_t hash_id, hash_type;
 	struct listhead *counter_list;
 	struct flow_hash_node *hash_node;
+	struct pkt_node pn_local = {};
 
 	inp_locally_locked = 0;
 	dir = PFIL_DIR(flags);
@@ -724,7 +722,6 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		goto inp_unlock;
 	}
 
-	bzero(&pn_local, sizeof(pn_local));
 	siftr_siftdata(&pn_local, inp, tp, dir, inp_locally_locked, ip, hash_node);
 	if (!spsc_enqueue_pkt(&siftr_ring, &pn_local)) {
 		/* drop if full */
