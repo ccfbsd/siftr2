@@ -41,6 +41,8 @@
  ******************************************************/
 
 #include <sys/param.h>
+#include <sys/systm.h>
+#include <sys/buf_ring.h>
 #include <sys/errno.h>
 #include <sys/eventhandler.h>
 #include <sys/hash.h>
@@ -62,6 +64,7 @@
 #include <sys/unistd.h>
 
 #include <machine/atomic.h>
+#include <machine/in_cksum.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
@@ -83,8 +86,6 @@
 #include <netinet/tcp_stacks/sack_filter.h>
 #include <netinet/tcp_stacks/tcp_rack.h>
 
-#include <machine/in_cksum.h>
-
 /*
  * The version number X.Y refers:
  * X is the major version number and Y has backward compatible changes
@@ -105,10 +106,10 @@ enum {
 	MAX_LOG_MSG_LEN = 200,
 };
 
-static MALLOC_DEFINE(M_SIFTR, "siftr2", "dynamic memory used by SIFTR2");
-static MALLOC_DEFINE(M_SIFTR_FLOW_INFO, "flow_info", "SIFTR2 flow_info struct");
-static MALLOC_DEFINE(M_SIFTR_HASHNODE, "siftr2_hashnode",
-		     "SIFTR2 flow_hash_node struct");
+static MALLOC_DEFINE(M_SIFTR, "siftr2", "ring buffer used by SIFTR2");
+static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr2_pktnode", "SIFTR2 pkt_node struct");
+static MALLOC_DEFINE(M_SIFTR_FLOW_INFO, "siftr2_flow_info", "SIFTR2 flow_info struct");
+static MALLOC_DEFINE(M_SIFTR_HASHNODE, "siftr2_hashnode", "SIFTR2 flow_hash_node struct");
 
 /* siftr2_pktnode: used as links in the pkt manager queue. */
 struct pkt_node {
@@ -160,79 +161,8 @@ struct pkt_node {
 	uint32_t		data_sz;
 };
 
-/* --- SPSC lock-free ring for pkt_node entries --- */
-struct spsc_entry {
-	struct pkt_node pn; /* by-value to avoid malloc/free in hook */
-};
-
-struct spsc_ring {
-	struct spsc_entry *buf;
-	uint32_t size;  /* power of two */
-	uint32_t mask;  /* size - 1 */
-	volatile uint32_t head; /* written by producer */
-	volatile uint32_t tail; /* written by consumer */
-};
-
-static struct spsc_ring siftr_ring;
+static struct buf_ring *siftr_br = NULL;
 static uint32_t siftr_ring_drops = 0; /* producer drops when full */
-
-static int
-spsc_ring_init(struct spsc_ring *r, uint32_t size)
-{
-	if ((size & (size - 1)) != 0) {
-		/* must be power of two */
-		return (EINVAL);
-	}
-	/* allocate ring storage */
-	r->buf = mallocarray(size, sizeof(struct spsc_entry), M_SIFTR,
-			M_NOWAIT|M_ZERO);
-	if (r->buf == NULL)
-		return (ENOMEM);
-	r->size = size;
-	r->mask = size - 1;
-	r->head = 0;
-	r->tail = 0;
-	return (0);
-}
-
-static void
-spsc_ring_destroy(struct spsc_ring *r)
-{
-	if (r->buf != NULL) {
-		free(r->buf, M_SIFTR);
-		r->buf = NULL;
-	}
-	r->size = r->mask = r->head = r->tail = 0;
-}
-
-static inline bool
-spsc_enqueue_pkt(struct spsc_ring *r, const struct pkt_node *pn)
-{
-	uint32_t head = r->head;
-	uint32_t next = (head + 1) & r->mask;
-	if (next == atomic_load_acq_32(&r->tail)) {
-		/* ring full */
-		return false;
-	}
-	r->buf[head].pn = *pn; /* by-value copy */
-	/* publish */
-	atomic_store_rel_32(&r->head, next);
-	return true;
-}
-
-static inline bool
-spsc_dequeue_pkt(struct spsc_ring *r, struct pkt_node *out)
-{
-	uint32_t tail = r->tail;
-	if (tail == atomic_load_acq_32(&r->head)) {
-		/* empty */
-		return false;
-	}
-	*out = r->buf[tail].pn;
-	atomic_store_rel_32(&r->tail, (tail + 1) & r->mask);
-	return true;
-}
-/* --- end SPSC ring --- */
 
 struct flow_info
 {
@@ -285,7 +215,6 @@ static uint32_t gen_flowid_cnt = 0;	// count of generating flowid
 static char siftr_logfile[PATH_MAX] = "/var/log/siftr2.log";
 static char siftr_logfile_shadow[PATH_MAX] = "/var/log/siftr2.log";
 static u_long siftr_hashmask;
-STAILQ_HEAD(pkthead, pkt_node) pkt_queue = STAILQ_HEAD_INITIALIZER(pkt_queue);
 LIST_HEAD(listhead, flow_hash_node) *counter_hash;
 static struct mtx siftr_pkt_mgr_mtx;
 static struct thread *siftr_pkt_manager_thr = NULL;
@@ -484,7 +413,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char *buf)
 static void
 siftr_pkt_manager_thread(void *arg)
 {
-	struct pkt_node pkt;
+	struct pkt_node *pn;
 	uint8_t draining = 2;
 	int ret_sz;
 	char line[MAX_LOG_MSG_LEN];
@@ -496,13 +425,15 @@ siftr_pkt_manager_thread(void *arg)
 		mtx_unlock(&siftr_pkt_mgr_mtx);
 
 		/* Drain all available packets in the ring */
-		while (spsc_dequeue_pkt(&siftr_ring, &pkt)) {
-			ret_sz = siftr_process_pkt(&pkt, line);
+		while ((pn = buf_ring_dequeue_sc(siftr_br)) != NULL) {
+			ret_sz = siftr_process_pkt(pn, line);
+
 			/* For now, emit to console; replace with vnode writes if desired */
 			printf("%.*s", ret_sz, line);
 			if (max_str_size < ret_sz) {
 				max_str_size = ret_sz;
 			}
+			free(pn, M_SIFTR_PKTNODE);
 		}
 
 		mtx_lock(&siftr_pkt_mgr_mtx);
@@ -611,6 +542,7 @@ static pfil_return_t
 siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
     void *ruleset __unused, struct inpcb *inp)
 {
+	struct pkt_node *pn;
 	struct ip *ip;
 	struct tcphdr *th;
 	struct tcpcb *tp;
@@ -618,7 +550,6 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	uint32_t hash_id, hash_type;
 	struct listhead *counter_list;
 	struct flow_hash_node *hash_node;
-	struct pkt_node pn_local = {};
 
 	inp_locally_locked = 0;
 	dir = PFIL_DIR(flags);
@@ -721,11 +652,19 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	if (hash_node == NULL) {
 		goto inp_unlock;
 	}
+	pn = malloc(sizeof(struct pkt_node), M_SIFTR_PKTNODE, M_NOWAIT|M_ZERO);
 
-	siftr_siftdata(&pn_local, inp, tp, dir, inp_locally_locked, ip, hash_node);
-	if (!spsc_enqueue_pkt(&siftr_ring, &pn_local)) {
+	if (pn == NULL) {
+		panic("%s: malloc failed", __func__);
+		goto inp_unlock;
+	}
+
+	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked, ip, hash_node);
+
+	if (buf_ring_enqueue(siftr_br, pn) != 0) {
 		/* drop if full */
 		atomic_add_32(&siftr_ring_drops, 1);
+		free(pn, M_SIFTR_PKTNODE);
 	} else {
 		/* nudge consumer */
 		wakeup(&wait_for_pkt);
@@ -827,9 +766,11 @@ siftr_manage_ops(uint8_t action)
 		return (-1);
 
 	if (action == SIFTR_ENABLE && siftr_pkt_manager_thr == NULL) {
-		/* Initialize SPSC ring */
-		if ((error = spsc_ring_init(&siftr_ring, SIFTR_RING_SIZE)) != 0)
-			return (error);
+		/* Initialize buf_ring */
+		siftr_br = buf_ring_alloc(SIFTR_RING_SIZE, M_SIFTR, M_NOWAIT, NULL);
+		if (siftr_br == NULL) {
+			return (ENOMEM);
+		}
 
 		siftr_exit_pkt_manager_thread = 0;
 		global_flow_cnt = siftr_ring_drops = max_str_size = gen_flowid_cnt = 0;
@@ -934,7 +875,10 @@ siftr_manage_ops(uint8_t action)
 		printf("%s", sbuf_data(s));
 
 		/* destroy ring */
-		spsc_ring_destroy(&siftr_ring);
+		if (siftr_br != NULL) {
+			buf_ring_free(siftr_br, M_SIFTR);
+			siftr_br = NULL;
+		}
 		global_flow_cnt = siftr_ring_drops = max_str_size = gen_flowid_cnt = 0;
 		free(arr, M_SIFTR_FLOW_INFO);
 	} else
