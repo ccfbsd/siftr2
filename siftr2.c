@@ -101,7 +101,7 @@
 enum {
 	HOOK = 0, UNHOOK = 1, SIFTR_DISABLE = 0, SIFTR_ENABLE = 1,
 	SIFTR_IPMODE = 4, SIFTR_EXPECTED_MAX_TCP_FLOWS = 65536,
-	SIFTR_LOG_FILE_MODE = 0644, RING_SIZE = 65536,
+	SIFTR_LOG_FILE_MODE = 0644, RING_SIZE = 65536, BATCHBUF_SIZE = 4096,
 	/*
 	 * Hard upper limit on the length of log messages. Bump this up if you
 	 * add new data fields such that the line length could exceed the below
@@ -165,11 +165,6 @@ struct pkt_node {
 	uint32_t		data_sz;
 };
 
-static struct buf_ring *siftr_br = NULL;
-static uint32_t siftr_ring_drops = 0; /* producer drops when full */
-static struct vnode *siftr_vnode = NULL;
-static struct ucred *siftr_vnode_cred = NULL;
-
 struct flow_info
 {
 	/* permanent info */
@@ -214,9 +209,14 @@ static bool     siftr_cwnd_filter = 0;
 static uint16_t siftr_port_filter = 0;
 static uint32_t siftr_pkts_per_log = 1;
 
+static struct buf_ring *siftr_br = NULL;
+static struct vnode *siftr_vnode = NULL;
+static struct ucred *siftr_vnode_cred = NULL;
+
+static uint32_t siftr_ring_drops = 0;	/* producer drops when full */
 static uint32_t max_str_size = 0;
 static uint32_t global_flow_cnt = 0;
-static uint32_t gen_flowid_cnt = 0;	// count of generating flowid
+static uint32_t gen_flowid_cnt = 0;	/* count of generating flowid */
 
 static char siftr_logfile[PATH_MAX] = "/var/log/siftr2.log";
 static char siftr_logfile_shadow[PATH_MAX] = "/var/log/siftr2.log";
@@ -232,7 +232,7 @@ static int wait_for_pkt;
 static int siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS);
 static int siftr_sysctl_logfile_name_handler(SYSCTL_HANDLER_ARGS);
 static int siftr_open_log(struct thread *td);
-static int siftr_write_log(struct thread *td, struct sbuf *s);
+static int siftr_write_log(struct thread *td, char *buf, size_t len);
 
 /* Declare the net.inet.siftr2 sysctl tree and populate it. */
 
@@ -321,12 +321,12 @@ siftr_new_hash_node(struct flow_info info)
 	}
 }
 
-static void
-siftr_process_pkt(struct pkt_node * pkt_node, struct sbuf *s)
+static int
+siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 {
 	struct flow_hash_node *hash_node;
 	struct listhead *counter_list;
-	int err;
+	int ret_sz;
 
 	if (pkt_node->flowid == 0) {
 		panic("%s: flowid not available", __func__);
@@ -360,10 +360,10 @@ siftr_process_pkt(struct pkt_node * pkt_node, struct sbuf *s)
 				 * connection, return.
 				 */
 				if (hash_node->counter > 0) {
-					return;
+					return (0);
 				}
 			} else {
-				return;
+				return (0);
 			}
 		} else {
 			hash_node->last_cwnd = pkt_node->snd_cwnd;
@@ -373,7 +373,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, struct sbuf *s)
 		hash_node->counter = (hash_node->counter + 1) %
 				     siftr_pkts_per_log;
 		if (hash_node->counter > 0) {
-			return;
+			return (0);
 		}
 	}
 
@@ -381,7 +381,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, struct sbuf *s)
 
 	/* Construct a log message.
 	 * cc xxx: check vasprintf()? */
-	err = sbuf_printf(s,
+	ret_sz = sprintf(buf,
 	    "%c,%jd.%06ld,%08x,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
 	    "%u,%u\n",
 	    direction[pkt_node->direction],
@@ -407,9 +407,15 @@ siftr_process_pkt(struct pkt_node * pkt_node, struct sbuf *s)
 	    pkt_node->th_ack,
 	    pkt_node->data_sz);
 
-	if (err < 0) {
-		printf("%s: the	buffer overflowed, error %d\n", __func__, err);
+	if (ret_sz >= MAX_LOG_MSG_LEN) {
+		panic("%s: record size %d larger than max record size %d",
+		      __func__, ret_sz, MAX_LOG_MSG_LEN);
+	} else if (ret_sz < 0) {
+		panic("%s: an encoding error occurred, return value %d",
+		      __func__, ret_sz);
 	}
+
+	return (ret_sz);
 }
 
 static void
@@ -417,8 +423,9 @@ siftr_pkt_manager_thread(void *arg)
 {
 	struct pkt_node *pn;
 	uint8_t draining = 2;
-	struct sbuf *s;
-	int len;
+	char batchbuf[BATCHBUF_SIZE];
+	size_t batchlen = 0;
+	int linelen = 0;
 
 	mtx_lock(&siftr_pkt_mgr_mtx);
 	while (draining) {
@@ -428,19 +435,24 @@ siftr_pkt_manager_thread(void *arg)
 
 		/* Drain all available packets in the ring */
 		while ((pn = buf_ring_dequeue_sc(siftr_br)) != NULL) {
-			s = sbuf_new(NULL, NULL, MAX_LOG_MSG_LEN, SBUF_AUTOEXTEND);
-			siftr_process_pkt(pn, s);
-			sbuf_finish(s);
-			len = sbuf_len(s);    /* include the null terminator */
+			/* Ensure there is room for at least one full record */
+			if (batchlen + MAX_LOG_MSG_LEN > BATCHBUF_SIZE) {
+				siftr_write_log(curthread, batchbuf, batchlen);
+				batchlen = 0;
+			}
 
-//			printf("%s", sbuf_data(s));
-			(void)siftr_write_log(curthread, s);
-
-			if (max_str_size < len) {
-				max_str_size = len;
+			linelen = siftr_process_pkt(pn, &batchbuf[batchlen]);
+			batchlen += linelen;
+			if (max_str_size < linelen) {
+				max_str_size = linelen;
 			}
 			free(pn, M_SIFTR_PKTNODE);
-			sbuf_delete(s);
+		}
+
+		/* Flush any accumulated batch if idle */
+		if (batchlen > 0) {
+			siftr_write_log(curthread, batchbuf, batchlen);
+			batchlen = 0;
 		}
 
 		mtx_lock(&siftr_pkt_mgr_mtx);
@@ -784,7 +796,7 @@ siftr_open_log(struct thread *td)
 
 /* Write to logfile */
 static int
-siftr_write_log(struct thread *td, struct sbuf *s)
+siftr_write_log(struct thread *td, char *buf, size_t len)
 {
 	struct iovec iov;
 	struct uio uio;
@@ -792,8 +804,8 @@ siftr_write_log(struct thread *td, struct sbuf *s)
 	int err;
 
 	/* Set up uio for writing */
-	iov.iov_base = sbuf_data(s);
-	iov.iov_len = sbuf_len(s);
+	iov.iov_base = buf;
+	iov.iov_len = len;
 
 	uio.uio_iov = &iov;
 	uio.uio_iovcnt = 1;
@@ -865,7 +877,7 @@ siftr_manage_ops(uint8_t action)
 
 		sbuf_finish(s);
 //		printf("%s", sbuf_data(s));
-		error = siftr_write_log(curthread, s);
+		error = siftr_write_log(curthread, sbuf_data(s), sbuf_len(s));
 	} else if (action == SIFTR_DISABLE && siftr_pkt_manager_thr != NULL) {
 		/*
 		 * Remove the pfil hook functions. All threads currently in
@@ -948,7 +960,7 @@ siftr_manage_ops(uint8_t action)
 		sbuf_finish(s);
 //		printf("%s", sbuf_data(s));
 
-		error = siftr_write_log(curthread, s);
+		error = siftr_write_log(curthread, sbuf_data(s), sbuf_len(s));
 
 		global_flow_cnt = siftr_ring_drops = max_str_size = gen_flowid_cnt = 0;
 		free(arr, M_SIFTR_FLOW_INFO);
