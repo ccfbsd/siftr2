@@ -1,4 +1,4 @@
-# siftr 2.2 (IPv4 only)
+# siftr 2.2 (IPv4 only) that still uses the ALQ(9) API
 This is my customized code to the stock freebsd/siftr, full name "Statistical Information For TCP Research".
 
 Its original FreeBSD Manual Page can be found here:
