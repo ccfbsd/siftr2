@@ -219,7 +219,6 @@ static uint32_t global_flow_cnt = 0;
 static uint32_t gen_flowid_cnt = 0;	/* count of generating flowid */
 
 static char siftr_logfile[PATH_MAX] = "/var/log/siftr2.log";
-static char siftr_logfile_shadow[PATH_MAX] = "/var/log/siftr2.log";
 static u_long siftr_hashmask;
 LIST_HEAD(listhead, flow_hash_node) *counter_hash;
 static struct mtx siftr_pkt_mgr_mtx;
@@ -247,8 +246,8 @@ SYSCTL_PROC(_net_inet_siftr2, OID_AUTO, enabled,
     "switch siftr2 module operations on/off");
 
 SYSCTL_PROC(_net_inet_siftr2, OID_AUTO, logfile,
-    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_NEEDGIANT, &siftr_logfile_shadow,
-    sizeof(siftr_logfile_shadow), &siftr_sysctl_logfile_name_handler, "A",
+    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_NEEDGIANT, &siftr_logfile,
+    sizeof(siftr_logfile), &siftr_sysctl_logfile_name_handler, "A",
     "file to save siftr2 log messages to");
 
 SYSCTL_UINT(_net_inet_siftr2, OID_AUTO, ppl, CTLFLAG_RW,
@@ -868,7 +867,6 @@ siftr_manage_ops(uint8_t action)
 		    SYS_NAME, __FreeBSD_version, SIFTR_IPMODE);
 
 		sbuf_finish(s);
-//		printf("%s", sbuf_data(s));
 		error = siftr_write_log(curthread, sbuf_data(s), sbuf_len(s));
 	} else if (action == SIFTR_DISABLE && siftr_pkt_manager_thr != NULL) {
 		/*
@@ -950,7 +948,6 @@ siftr_manage_ops(uint8_t action)
 
 		sbuf_printf(s, "\n");
 		sbuf_finish(s);
-//		printf("%s", sbuf_data(s));
 
 		error = siftr_write_log(curthread, sbuf_data(s), sbuf_len(s));
 
@@ -975,11 +972,6 @@ siftr_manage_ops(uint8_t action)
 		error = EINVAL;
 
 	sbuf_delete(s);
-
-	/*
-	 * XXX: Should be using ret to check if any functions fail
-	 * and set error appropriately
-	 */
 
 	return (error);
 }
