@@ -787,8 +787,8 @@ siftr_open_log(struct thread *td)
 		return (err);
 	}
 
-	siftr_vnode = fp->f_vnode;
 	/* keep vnode around; increment ref */
+	siftr_vnode = fp->f_vnode;
 	siftr_vnode_cred = crhold(td->td_ucred);
 
 	return (err);
@@ -800,7 +800,6 @@ siftr_write_log(struct thread *td, char *buf, size_t len)
 {
 	struct iovec iov;
 	struct uio uio;
-	struct mount *mp;
 	int err;
 
 	/* Set up uio for writing */
@@ -816,17 +815,10 @@ siftr_write_log(struct thread *td, char *buf, size_t len)
 	uio.uio_td = td;
 
 	/* Write the data */
-	if ((err = vn_start_write(siftr_vnode, &mp, V_WAIT)) != 0) {
-		printf("Failed in vn_start_write(): error %d\n", err);
-		return err;
-	}
-	vn_lock(siftr_vnode, LK_EXCLUSIVE | LK_RETRY);
 	if ((err = VOP_WRITE(siftr_vnode, &uio, IO_APPEND | IO_UNIT,
 			     siftr_vnode_cred)) != 0) {
 		printf("Failed in VOP_WRITE(): error %d\n", err);
 	}
-	VOP_UNLOCK(siftr_vnode);
-	vn_finished_write(mp);
 
 	return err;
 }
