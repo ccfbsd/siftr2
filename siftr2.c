@@ -849,17 +849,9 @@ siftr_manage_ops(uint8_t action)
 			return error;
 		}
 
-		siftr_exit_pkt_manager_thread = 0;
-		global_flow_cnt = siftr_ring_drops = max_str_size = gen_flowid_cnt = 0;
-
-		kthread_add(&siftr_pkt_manager_thread, NULL, NULL,
-		    &siftr_pkt_manager_thr, RFNOWAIT, 0,
-		    "siftr_pkt_manager_thr");
-
-		siftr_pfil(HOOK);
-
 		microtime(&tval);
 
+		/* write log header */
 		sbuf_printf(s,
 		    "enable_time_secs=%jd\tenable_time_usecs=%06ld\t"
 		    "siftrver=%s\tsysname=%s\tsysver=%u\tipmode=%u\n",
@@ -868,6 +860,15 @@ siftr_manage_ops(uint8_t action)
 
 		sbuf_finish(s);
 		error = siftr_write_log(curthread, sbuf_data(s), sbuf_len(s));
+
+		siftr_exit_pkt_manager_thread = 0;
+		global_flow_cnt = siftr_ring_drops = max_str_size = gen_flowid_cnt = 0;
+
+		kthread_add(&siftr_pkt_manager_thread, NULL, NULL,
+		    &siftr_pkt_manager_thr, RFNOWAIT, 0,
+		    "siftr_pkt_manager_thr");
+
+		siftr_pfil(HOOK);
 	} else if (action == SIFTR_DISABLE && siftr_pkt_manager_thr != NULL) {
 		/*
 		 * Remove the pfil hook functions. All threads currently in
