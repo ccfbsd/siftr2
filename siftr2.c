@@ -814,10 +814,12 @@ siftr_write_log(struct thread *td, char *buf, size_t len)
 	uio.uio_td = td;
 
 	/* Write the data */
+	vn_lock(siftr_vnode, LK_EXCLUSIVE | LK_RETRY);
 	if ((err = VOP_WRITE(siftr_vnode, &uio, IO_APPEND | IO_UNIT,
 			     siftr_vnode_cred)) != 0) {
 		printf("Failed in VOP_WRITE(): error %d\n", err);
 	}
+	VOP_UNLOCK(siftr_vnode);
 
 	return err;
 }
