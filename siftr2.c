@@ -224,6 +224,7 @@ static int wait_for_pkt;
 /* Required function prototypes. */
 static int siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS);
 static int siftr_sysctl_logfile_name_handler(SYSCTL_HANDLER_ARGS);
+static int siftr_sysctl_flowid_filter_handler(SYSCTL_HANDLER_ARGS);
 static int siftr_open_log(struct thread *td);
 static int siftr_write_log(struct thread *td, char *buf, size_t len);
 
@@ -260,6 +261,12 @@ static bool siftr_cwnd_filter = 0;
 SYSCTL_BOOL(_net_inet_siftr2, OID_AUTO, cwnd_filter, CTLFLAG_RW,
     &siftr_cwnd_filter, 0,
     "enable packet filter to record only variance of TCP congestion window");
+
+static uint32_t siftr_flowid_filter = 0;
+SYSCTL_PROC(_net_inet_siftr2, OID_AUTO, flowid_filter,
+    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+    NULL, 0, &siftr_sysctl_flowid_filter_handler, "A",
+    "8-hex-digit flowid filter (e.g., 1a2b3c4d or 0x1A2B3C4D)");
 
 /* Begin functions. */
 
@@ -629,6 +636,11 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	}
 
 	hash_id = siftr_get_flowid(inp, &hash_type);
+
+	if (siftr_flowid_filter != 0 && hash_id != siftr_flowid_filter) {
+		goto inp_unlock;
+	}
+
 	counter_list = counter_hash + (hash_id & siftr_hashmask);
 	hash_node = siftr_find_flow(counter_list, hash_id);
 
@@ -748,6 +760,48 @@ siftr_sysctl_logfile_name_handler(SYSCTL_HANDLER_ARGS)
 	if (strncmp(siftr_logfile, arg1, arg2) != 0)
 		strlcpy(siftr_logfile, arg1, arg2);
 	return (0);
+}
+
+static int
+siftr_sysctl_flowid_filter_handler(SYSCTL_HANDLER_ARGS)
+{
+	int error;
+	char buf[16];
+	uint32_t value = siftr_flowid_filter;
+
+	/* Present current value as 8-hex without 0x prefix */
+	snprintf(buf, sizeof(buf), "%08x", value);
+
+	error = sysctl_handle_string(oidp, buf, sizeof(buf), req);
+	if (error != 0 || req->newptr == NULL)
+		return error;
+
+	/* Accept optional 0x/0X prefix; ensure up to 8 hex digits */
+	const char *p = buf;
+	if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
+		p += 2;
+
+	/* Validate hex-only and length */
+	size_t n = strnlen(p, sizeof(buf));
+	if (n == 0 || n > 8)
+		return EINVAL;
+	for (size_t i = 0; i < n; i++) {
+		char c = p[i];
+		if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+		      (c >= 'A' && c <= 'F')))
+			return EINVAL;
+	}
+
+	/* Parse */
+	char *endp = NULL;
+	unsigned long parsed = strtoul(p, &endp, 16);
+	if (endp == NULL || *endp != '\0')
+		return EINVAL;
+	if (parsed > 0xFFFFFFFFUL)
+		return ERANGE;
+
+	siftr_flowid_filter = (uint32_t)parsed;
+	return 0;
 }
 
 static int
