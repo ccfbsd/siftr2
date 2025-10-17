@@ -94,8 +94,8 @@
  * The version number X.Y refers:
  * X is the major version number and Y has backward compatible changes
  */
-#define MODVERSION	__CONCAT(2,2)
-#define MODVERSION_STR	__XSTRING(2) "." __XSTRING(2)
+#define MODVERSION	__CONCAT(2,3)
+#define MODVERSION_STR	__XSTRING(2) "." __XSTRING(3)
 #define SYS_NAME "FreeBSD"
 
 enum {
@@ -123,7 +123,7 @@ struct pkt_node {
 		DIR_OUT = 1,
 	}			direction;
 	/* Timestamp of pkt as noted in the pfil hook. */
-	struct timeval		tval;
+	sbintime_t		tval;
 	/* Flowid for the connection. */
 	uint32_t		flowid;
 	/* Congestion Window (bytes). */
@@ -387,11 +387,10 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 	/* Construct a log message.
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
-	    "%c,%jd.%06ld,%08x,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+	    "%c,%lld,%08x,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
 	    "%u,%u\n",
 	    direction[pkt_node->direction],
-	    (intmax_t)pkt_node->tval.tv_sec,
-	    pkt_node->tval.tv_usec,
+	    (long long)pkt_node->tval,
 	    pkt_node->flowid,
 	    pkt_node->snd_cwnd,
 	    pkt_node->snd_ssthresh,
@@ -512,6 +511,7 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	       int dir, int inp_locally_locked, struct ip *ip,
 	       struct flow_hash_node *hash_node)
 {
+	struct timeval tv;
 	struct tcphdr *th = (struct tcphdr *)((caddr_t)ip + (ip->ip_hl << 2));
 
 	pn->snd_cwnd = tp->snd_cwnd;
@@ -551,7 +551,8 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	 * Gives true microsecond resolution at the expense of a hit to
 	 * maximum pps throughput processing when SIFTR is loaded and enabled.
 	 */
-	microtime(&pn->tval);
+	microtime(&tv);
+	pn->tval = tvtosbt(tv);
 }
 
 /*
