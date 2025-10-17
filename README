@@ -8,6 +8,7 @@ I add a Makefile for local compile, assuming your freebsd source tree is at /usr
 
 defaults:
 sysctl net.inet.siftr2
+net.inet.siftr2.flowid_filter: 00000000
 net.inet.siftr2.cwnd_filter: 0
 net.inet.siftr2.port_filter: 0
 net.inet.siftr2.ppl: 1
