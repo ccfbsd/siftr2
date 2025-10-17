@@ -203,12 +203,6 @@ struct flow_hash_node
 	LIST_ENTRY(flow_hash_node) nodes;
 };
 
-static volatile bool siftr_exit_pkt_manager_thread = 0;
-static bool     siftr_enabled = 0;
-static bool     siftr_cwnd_filter = 0;
-static uint16_t siftr_port_filter = 0;
-static uint32_t siftr_pkts_per_log = 1;
-
 static struct buf_ring *siftr_br = NULL;
 static struct vnode *siftr_vnode = NULL;
 static struct ucred *siftr_vnode_cred = NULL;
@@ -218,11 +212,11 @@ static uint32_t max_str_size = 0;
 static uint32_t global_flow_cnt = 0;
 static uint32_t gen_flowid_cnt = 0;	/* count of generating flowid */
 
-static char siftr_logfile[PATH_MAX] = "/var/log/siftr2.log";
 static u_long siftr_hashmask;
 LIST_HEAD(listhead, flow_hash_node) *counter_hash;
 static struct mtx siftr_pkt_mgr_mtx;
 static struct thread *siftr_pkt_manager_thr = NULL;
+static volatile bool siftr_exit_pkt_manager_thread = 0;
 static char direction[2] = {'i','o'};
 static eventhandler_tag siftr_shutdown_tag;
 static int wait_for_pkt;
@@ -240,24 +234,29 @@ SYSCTL_DECL(_net_inet_siftr2);
 SYSCTL_NODE(_net_inet, OID_AUTO, siftr2, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     "siftr2 related settings");
 
+static bool siftr_enabled = 0;
 SYSCTL_PROC(_net_inet_siftr2, OID_AUTO, enabled,
     CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &siftr_enabled, 0, &siftr_sysctl_enabled_handler, "IU",
     "switch siftr2 module operations on/off");
 
+static char siftr_logfile[PATH_MAX] = "/var/log/siftr2.log";
 SYSCTL_PROC(_net_inet_siftr2, OID_AUTO, logfile,
     CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_NEEDGIANT, &siftr_logfile,
     sizeof(siftr_logfile), &siftr_sysctl_logfile_name_handler, "A",
     "file to save siftr2 log messages to");
 
+static uint32_t siftr_pkts_per_log = 1;
 SYSCTL_UINT(_net_inet_siftr2, OID_AUTO, ppl, CTLFLAG_RW,
     &siftr_pkts_per_log, 1,
     "number of packets between generating a log message");
 
+static uint16_t siftr_port_filter = 0;
 SYSCTL_U16(_net_inet_siftr2, OID_AUTO, port_filter, CTLFLAG_RW,
     &siftr_port_filter, 0,
     "enable packet filter on a TCP port");
 
+static bool siftr_cwnd_filter = 0;
 SYSCTL_BOOL(_net_inet_siftr2, OID_AUTO, cwnd_filter, CTLFLAG_RW,
     &siftr_cwnd_filter, 0,
     "enable packet filter to record only variance of TCP congestion window");
