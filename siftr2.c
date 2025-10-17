@@ -596,11 +596,8 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	 */
 	th = (struct tcphdr *)((caddr_t)ip + (ip->ip_hl << 2));
 
-	/*
-	 * Only pkts selected by the tcp port filter
-	 * can be inserted into the pkt_queue
-	 */
-	if ((siftr_port_filter != 0) &&
+	/* Packets matched by the tcp port filter can be inserted into queue. */
+	if ((siftr_flowid_filter == 0 ) && (siftr_port_filter != 0) &&
 	    (siftr_port_filter != ntohs(th->th_sport)) &&
 	    (siftr_port_filter != ntohs(th->th_dport))) {
 		goto ret;
@@ -637,6 +634,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 
 	hash_id = siftr_get_flowid(inp, &hash_type);
 
+	/* Packets matched by the flowid filter can be inserted into queue. */
 	if (siftr_flowid_filter != 0 && hash_id != siftr_flowid_filter) {
 		goto inp_unlock;
 	}
