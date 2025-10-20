@@ -122,8 +122,8 @@ struct pkt_node {
 		DIR_IN = 0,
 		DIR_OUT = 1,
 	}			direction;
-	/* Timestamp of pkt as noted in the pfil hook. */
-	sbintime_t		tval;
+	/* Timestamp (milliseconds) since SIFTR enable. */
+	uint32_t		tval;
 	/* Flowid for the connection. */
 	uint32_t		flowid;
 	/* Congestion Window (bytes). */
@@ -220,6 +220,7 @@ static volatile bool siftr_exit_pkt_manager_thread = 0;
 static char direction[2] = {'i','o'};
 static eventhandler_tag siftr_shutdown_tag;
 static int wait_for_pkt;
+static sbintime_t siftr_start_sbt; /* base time when SIFTR enabled */
 
 /* Required function prototypes. */
 static int siftr_sysctl_enabled_handler(SYSCTL_HANDLER_ARGS);
@@ -387,10 +388,10 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 	/* Construct a log message.
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
-	    "%c,%lld,%08x,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
+	    "%c,%x,%08x,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
 	    "%u,%u\n",
 	    direction[pkt_node->direction],
-	    (long long)pkt_node->tval,
+	    pkt_node->tval,
 	    pkt_node->flowid,
 	    pkt_node->snd_cwnd,
 	    pkt_node->snd_ssthresh,
@@ -511,7 +512,8 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	       int dir, int inp_locally_locked, struct ip *ip,
 	       struct flow_hash_node *hash_node)
 {
-	struct timeval tv;
+	sbintime_t rel_sbt;
+	uint64_t rel_ms;
 	struct tcphdr *th = (struct tcphdr *)((caddr_t)ip + (ip->ip_hl << 2));
 
 	pn->snd_cwnd = tp->snd_cwnd;
@@ -546,13 +548,13 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->th_ack = ntohl(th->th_ack);
 	pn->data_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
 
-	/*
-	 * Significantly more accurate than using getmicrotime(), but slower!
-	 * Gives true microsecond resolution at the expense of a hit to
-	 * maximum pps throughput processing when SIFTR is loaded and enabled.
-	 */
-	microtime(&tv);
-	pn->tval = tvtosbt(tv);
+	/* Relative time in milliseconds since SIFTR enable (uint32_t). */
+	rel_sbt = getsbinuptime() - siftr_start_sbt;
+	/* Convert sbintime_t (fractional seconds, 32.32) to milliseconds. */
+	rel_ms = ((uint64_t)rel_sbt * 1000ULL) >> 32;
+	if (rel_ms > UINT32_MAX)
+		rel_ms = UINT32_MAX;
+	pn->tval = (uint32_t)rel_ms;
 }
 
 /*
@@ -904,6 +906,7 @@ siftr_manage_ops(uint8_t action)
 		}
 
 		microtime(&tval);
+		siftr_start_sbt = getsbinuptime();
 
 		/* write log header */
 		sbuf_printf(s,
