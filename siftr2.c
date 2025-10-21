@@ -388,8 +388,8 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 	/* Construct a log message.
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
-	    "%08x,%c,%x,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,"
-	    "%u,%u\n",
+	    "%08x,%c,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,"
+	    "%x,%x\n",
 	    pkt_node->flowid,
 	    direction[pkt_node->direction],
 	    pkt_node->tval,
