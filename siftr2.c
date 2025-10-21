@@ -106,8 +106,14 @@ enum {
 	 * Hard upper limit on the length of log messages. Bump this up if you
 	 * add new data fields such that the line length could exceed the below
 	 * value.
+	 * How to count chars in the output record:
+	 * a. Literal separators: 18 commas + 1 newline = 19
+	 * b. First field %08x: 8
+	 *    Second field %c: 1
+	 *    Remaining 17 fields %x: 17 × 8 = 136
+	 * Total maximum = 8 + 1 + 136 + 19 = 164 chars.
 	 */
-	MAX_LOG_MSG_LEN = 200,
+	MAX_LOG_MSG_LEN = 164,
 };
 
 static MALLOC_DEFINE(M_SIFTR, "siftr2", "ring buffer used by SIFTR2");
