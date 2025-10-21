@@ -156,11 +156,6 @@ struct pkt_node {
 	uint32_t		pipe;
 	/* Number of segments currently in the reassembly queue. */
 	int			t_segqlen;
-	/* Flow type for the connection. */
-	/* TCP sequence number */
-	tcp_seq			th_seq;
-	/* TCP acknowledgement number */
-	tcp_seq			th_ack;
 	/* the length of TCP segment payload in bytes */
 	uint32_t		data_sz;
 };
@@ -388,8 +383,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 	/* Construct a log message.
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
-	    "%08x,%c,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,"
-	    "%x,%x\n",
+	    "%08x,%c,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x\n",
 	    pkt_node->flowid,
 	    direction[pkt_node->direction],
 	    pkt_node->tval,
@@ -408,8 +402,6 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 	    pkt_node->rcv_buf_cc,
 	    pkt_node->pipe,
 	    pkt_node->t_segqlen,
-	    pkt_node->th_seq,
-	    pkt_node->th_ack,
 	    pkt_node->data_sz);
 
 	if (ret_sz >= MAX_LOG_MSG_LEN) {
@@ -514,7 +506,7 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 {
 	sbintime_t rel_sbt;
 	uint64_t rel_ms;
-	struct tcphdr *th = (struct tcphdr *)((caddr_t)ip + (ip->ip_hl << 2));
+	struct tcphdr *th;
 
 	pn->snd_cwnd = tp->snd_cwnd;
 	pn->snd_wnd = tp->snd_wnd;
@@ -544,8 +536,10 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 
 	pn->direction = (dir == PFIL_IN ? DIR_IN : DIR_OUT);
 	pn->flowid = hash_node->const_info.key;
-	pn->th_seq = ntohl(th->th_seq);
-	pn->th_ack = ntohl(th->th_ack);
+
+	th = (struct tcphdr *)((caddr_t)ip + (ip->ip_hl << 2));
+//	pn->th_seq = ntohl(th->th_seq);
+//	pn->th_ack = ntohl(th->th_ack);
 	pn->data_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
 
 	/* Relative time in milliseconds since SIFTR enable (uint32_t). */
