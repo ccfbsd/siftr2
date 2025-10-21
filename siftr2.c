@@ -90,13 +90,14 @@
 #include <netinet/tcp_stacks/sack_filter.h>
 #include <netinet/tcp_stacks/tcp_rack.h>
 
+extern const char version[];  /* Declared in sys/kern/kern_mib.c */
+
 /*
  * The version number X.Y refers:
  * X is the major version number and Y has backward compatible changes
  */
 #define MODVERSION	__CONCAT(2,3)
 #define MODVERSION_STR	__XSTRING(2) "." __XSTRING(3)
-#define SYS_NAME "FreeBSD"
 
 enum {
 	HOOK = 0, UNHOOK = 1, SIFTR_DISABLE = 0, SIFTR_ENABLE = 1,
@@ -895,6 +896,21 @@ siftr_manage_ops(uint8_t action)
 		return (ENOMEM);
 
 	if (action == SIFTR_ENABLE && siftr_pkt_manager_thr == NULL) {
+		char verline[100];
+		const char *nl;
+
+		/* find the first line of the kernel version string */
+		nl = strchr(version, '\n');
+		if (nl != NULL) {
+		    size_t len = nl - version;  /* stop before '\n' */
+		    if (len >= sizeof(verline))
+		        len = sizeof(verline) - 1;
+		    memcpy(verline, version, len);
+		    verline[len] = '\0';
+		} else {
+		    strlcpy(verline, version, sizeof(verline));
+		}
+
 		/* Initialize buf_ring */
 		siftr_br = buf_ring_alloc(RING_SIZE, M_SIFTR, M_NOWAIT, NULL);
 		if (siftr_br == NULL) {
@@ -911,9 +927,9 @@ siftr_manage_ops(uint8_t action)
 		/* write log header */
 		sbuf_printf(s,
 		    "enable_time_secs=%jd\tenable_time_usecs=%06ld\t"
-		    "siftrver=%s\tsysname=%s\tsysver=%u\tipmode=%u\n",
-		    (intmax_t)tval.tv_sec, tval.tv_usec, MODVERSION_STR,
-		    SYS_NAME, __FreeBSD_version, SIFTR_IPMODE);
+		    "siftrver=%s\tipmode=%u\tsysver=%s\n",
+		    (intmax_t)tval.tv_sec, tval.tv_usec,
+		    MODVERSION_STR, SIFTR_IPMODE, verline);
 
 		sbuf_finish(s);
 		error = siftr_write_log(curthread, sbuf_data(s), sbuf_len(s));
