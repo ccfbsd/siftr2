@@ -102,7 +102,7 @@ extern const char version[];  /* Declared in sys/kern/kern_mib.c */
 enum {
 	HOOK = 0, UNHOOK = 1, SIFTR_DISABLE = 0, SIFTR_ENABLE = 1,
 	SIFTR_IPMODE = 4, SIFTR_EXPECTED_MAX_TCP_FLOWS = 65536,
-	SIFTR_LOG_FILE_MODE = 0644, RING_SIZE = 65536, BATCHBUF_SIZE = 4096,
+	SIFTR_LOG_FILE_MODE = 0644, RING_SIZE = 65536, BATCHBUF_SIZE = PAGE_SIZE,
 	/*
 	 * Hard upper limit on the length of log messages. Bump this up if you
 	 * add new data fields such that the line length could exceed the below
