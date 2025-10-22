@@ -102,7 +102,7 @@ extern const char version[];  /* Declared in sys/kern/kern_mib.c */
 enum {
 	HOOK = 0, UNHOOK = 1, SIFTR_DISABLE = 0, SIFTR_ENABLE = 1,
 	SIFTR_IPMODE = 4, SIFTR_EXPECTED_MAX_TCP_FLOWS = 65536,
-	SIFTR_LOG_FILE_MODE = 0644, RING_SIZE = 65536, BATCHBUF_SIZE = PAGE_SIZE,
+	SIFTR_LOG_FILE_MODE = 0644, RING_SIZE = 65536,
 	/*
 	 * Hard upper limit on the length of log messages. Bump this up if you
 	 * add new data fields such that the line length could exceed the below
@@ -115,6 +115,7 @@ enum {
 	 * Total maximum = 8 + 1 + 136 + 19 = 164 chars.
 	 */
 	MAX_LOG_MSG_LEN = 164,
+	BATCHBUF_SIZE = PAGE_SIZE + MAX_LOG_MSG_LEN,
 };
 
 static MALLOC_DEFINE(M_SIFTR, "siftr2", "ring buffer used by SIFTR2");
@@ -428,8 +429,7 @@ siftr_pkt_manager_thread(void *arg)
 	struct pkt_node *pn;
 	uint8_t draining = 2;
 	char batchbuf[BATCHBUF_SIZE];
-	size_t batchlen = 0;
-	int linelen = 0;
+	size_t linelen, sum, batchlen = 0;
 
 	mtx_lock(&siftr_pkt_mgr_mtx);
 	while (draining) {
@@ -439,14 +439,28 @@ siftr_pkt_manager_thread(void *arg)
 
 		/* Drain all available packets in the ring */
 		while ((pn = buf_ring_dequeue_sc(siftr_br)) != NULL) {
-			/* Ensure there is room for at least one full record */
-			if (batchlen + MAX_LOG_MSG_LEN > BATCHBUF_SIZE) {
-				siftr_write_log(curthread, batchbuf, batchlen);
+			linelen = (size_t)siftr_process_pkt(pn, &batchbuf[batchlen]);
+
+			sum = batchlen + linelen;
+			if (sum < PAGE_SIZE) {
+				/* still within the current page */
+				batchlen = sum;
+			} else if (sum == PAGE_SIZE) {
+				/* perfect fit: write a full page */
+				siftr_write_log(curthread, batchbuf, PAGE_SIZE);
 				batchlen = 0;
+			} else {
+				/* crossing a page boundary: split the record */
+				size_t tail = linelen - (PAGE_SIZE - batchlen);
+				siftr_write_log(curthread, batchbuf, PAGE_SIZE);
+
+				/* Move the overflow (tail of the record) to the
+				 * start of the buffer.
+				 */
+				memmove(batchbuf, &batchbuf[PAGE_SIZE], tail);
+				batchlen = tail;
 			}
 
-			linelen = siftr_process_pkt(pn, &batchbuf[batchlen]);
-			batchlen += linelen;
 			if (max_str_size < linelen) {
 				max_str_size = linelen;
 			}
