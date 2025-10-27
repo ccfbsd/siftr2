@@ -118,6 +118,10 @@ enum {
 	BATCHBUF_SIZE = PAGE_SIZE + MAX_LOG_MSG_LEN,
 };
 
+/* Ensure RING_SIZE remains a power of two (and non-zero). */
+_Static_assert(RING_SIZE != 0 && ((RING_SIZE & (RING_SIZE - 1)) == 0),
+    "RING_SIZE must be a power of two");
+
 static MALLOC_DEFINE(M_SIFTR, "siftr2", "ring buffer used by SIFTR2");
 static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr2_pktnode", "SIFTR2 pkt_node struct");
 static MALLOC_DEFINE(M_SIFTR_FLOW_INFO, "siftr2_flow_info", "SIFTR2 flow_info struct");
