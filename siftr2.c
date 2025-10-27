@@ -499,12 +499,11 @@ siftr_findinpcb(struct ip *ip, struct mbuf *m, uint16_t sport, uint16_t dport,
 	INP_INFO_WUNLOCK_ASSERT(&V_tcbinfo);
 
 	if (dir == PFIL_IN)
-		inp = in_pcblookup(&V_tcbinfo, ip->ip_src, sport, ip->ip_dst,
-				   dport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif);
-
+		inp = in_pcblookup_mbuf(&V_tcbinfo, ip->ip_src, sport, ip->ip_dst,
+					dport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif, m);
 	else
-		inp = in_pcblookup(&V_tcbinfo, ip->ip_dst, dport, ip->ip_src,
-				   sport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif);
+		inp = in_pcblookup_mbuf(&V_tcbinfo, ip->ip_dst, dport, ip->ip_src,
+					sport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif, m);
 
 	/* If we can't find the inpcb, bail. */
 	return (inp);
