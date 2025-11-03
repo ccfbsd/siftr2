@@ -150,8 +150,6 @@ struct pkt_node {
 	u_int			t_flags;
 	/* More tcpcb flags storage */
 	u_int			t_flags2;
-	/* Current state of the TCP FSM. */
-	uint8_t			conn_state;
 	/* Smoothed RTT (usecs). */
 	uint32_t		srtt;
 	/* Retransmission timeout (usec). */
@@ -395,7 +393,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 	/* Construct a log message.
 	 * cc xxx: check vasprintf()? */
 	ret_sz = sprintf(buf,
-	    "%08x,%c,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x\n",
+	    "%08x,%c,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x\n",
 	    pkt_node->flowid,
 	    direction[pkt_node->direction],
 	    pkt_node->tval,
@@ -405,7 +403,6 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 	    pkt_node->rcv_wnd,
 	    pkt_node->t_flags,
 	    pkt_node->t_flags2,
-	    pkt_node->conn_state,
 	    pkt_node->srtt,
 	    pkt_node->rto,
 	    pkt_node->snd_buf_hiwater,
@@ -537,7 +534,6 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->rcv_wnd = tp->rcv_wnd;
 	pn->t_flags2 = tp->t_flags2;
 	pn->snd_ssthresh = tp->snd_ssthresh;
-	pn->conn_state = tp->t_state;
 
 	if (hash_node->const_info.stack_type == FBSD) {
 		pn->srtt = ((uint64_t)tp->t_srtt * tick) >> TCP_RTT_SHIFT;
