@@ -129,6 +129,8 @@ static MALLOC_DEFINE(M_SIFTR_HASHNODE, "siftr2_hashnode", "SIFTR2 flow_hash_node
 
 /* siftr2_pktnode: used as links in the pkt manager queue. */
 struct pkt_node {
+	/* Flowid for the connection. */
+	uint32_t		flowid;
 	/* Direction pkt is travelling. */
 	enum {
 		DIR_IN = 0,
@@ -136,12 +138,14 @@ struct pkt_node {
 	}			direction;
 	/* Timestamp (milliseconds) since SIFTR enable. */
 	uint32_t		tval;
-	/* Flowid for the connection. */
-	uint32_t		flowid;
 	/* Congestion Window (bytes). */
 	uint32_t		snd_cwnd;
 	/* Slow Start Threshold (bytes). */
 	uint32_t		snd_ssthresh;
+	/* Smoothed RTT (usecs). */
+	uint32_t		srtt;
+	/* the length of TCP segment payload in bytes */
+	uint32_t		data_sz;
 	/* Sending Window (bytes). */
 	uint32_t		snd_wnd;
 	/* Receive Window (bytes). */
@@ -150,8 +154,6 @@ struct pkt_node {
 	u_int			t_flags;
 	/* More tcpcb flags storage */
 	u_int			t_flags2;
-	/* Smoothed RTT (usecs). */
-	uint32_t		srtt;
 	/* Retransmission timeout (usec). */
 	uint32_t		rto;
 	/* Size of the TCP send buffer in bytes. */
@@ -166,8 +168,6 @@ struct pkt_node {
 	uint32_t		pipe;
 	/* Number of segments currently in the reassembly queue. */
 	int			t_segqlen;
-	/* the length of TCP segment payload in bytes */
-	uint32_t		data_sz;
 };
 
 struct flow_info
@@ -399,19 +399,19 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 	    pkt_node->tval,
 	    pkt_node->snd_cwnd,
 	    pkt_node->snd_ssthresh,
+	    pkt_node->srtt,
+	    pkt_node->data_sz,
 	    pkt_node->snd_wnd,
 	    pkt_node->rcv_wnd,
 	    pkt_node->t_flags,
 	    pkt_node->t_flags2,
-	    pkt_node->srtt,
 	    pkt_node->rto,
 	    pkt_node->snd_buf_hiwater,
 	    pkt_node->snd_buf_cc,
 	    pkt_node->rcv_buf_hiwater,
 	    pkt_node->rcv_buf_cc,
 	    pkt_node->pipe,
-	    pkt_node->t_segqlen,
-	    pkt_node->data_sz);
+	    pkt_node->t_segqlen);
 
 	if (ret_sz >= MAX_LOG_MSG_LEN) {
 		panic("%s: record size %d larger than max record size %d",
