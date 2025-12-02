@@ -1,4 +1,4 @@
-# siftr 2.3 (IPv4 only)
+# siftr 2.4 (IPv4 only)
 This is my customized code to the stock freebsd/siftr, full name "Statistical Information For TCP Research".
 
 Its original FreeBSD Manual Page can be found here:
@@ -8,6 +8,7 @@ I add a Makefile for local compile, assuming your freebsd source tree is at /usr
 
 defaults:
 sysctl net.inet.siftr2
+net.inet.siftr2.enable_binary_record: 0
 net.inet.siftr2.flowid_filter: 00000000
 net.inet.siftr2.cwnd_filter: 0
 net.inet.siftr2.port_filter: 0

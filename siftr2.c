@@ -96,8 +96,8 @@ extern const char version[];  /* Declared in sys/kern/kern_mib.c */
  * The version number X.Y refers:
  * X is the major version number and Y has backward compatible changes
  */
-#define MODVERSION	__CONCAT(2,3)
-#define MODVERSION_STR	__XSTRING(2) "." __XSTRING(3)
+#define MODVERSION	__CONCAT(2,4)
+#define MODVERSION_STR	__XSTRING(2) "." __XSTRING(4)
 
 enum {
 	HOOK = 0, UNHOOK = 1, SIFTR_DISABLE = 0, SIFTR_ENABLE = 1,
