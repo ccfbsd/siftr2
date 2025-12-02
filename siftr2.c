@@ -4,6 +4,7 @@
  * Copyright (c) 2007-2009
  * 	Swinburne University of Technology, Melbourne, Australia.
  * Copyright (c) 2009-2010, The FreeBSD Foundation
+ * Copyright (c) 2025 Cheng Cui <cc@freebsd.org>
  * All rights reserved.
  *
  * Portions of this software were developed at the Centre for Advanced
@@ -127,7 +128,7 @@ static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr2_pktnode", "SIFTR2 pkt_node struct"
 static MALLOC_DEFINE(M_SIFTR_FLOW_INFO, "siftr2_flow_info", "SIFTR2 flow_info struct");
 static MALLOC_DEFINE(M_SIFTR_HASHNODE, "siftr2_hashnode", "SIFTR2 flow_hash_node struct");
 
-/* siftr2_pktnode: used as links in the pkt manager queue. */
+/* siftr2_pktnode: used as records in the pkt manager ring buffer. */
 struct pkt_node {
 	/* Flowid for the connection. */
 	uint32_t		flowid;
@@ -151,24 +152,24 @@ struct pkt_node {
 	/* Receive Window (bytes). */
 	uint32_t		rcv_wnd;
 	/* TCP control block flags. */
-	u_int			t_flags;
+	uint32_t		t_flags;
 	/* More tcpcb flags storage */
-	u_int			t_flags2;
+	uint32_t		t_flags2;
 	/* Retransmission timeout (usec). */
 	uint32_t		rto;
 	/* Size of the TCP send buffer in bytes. */
-	u_int			snd_buf_hiwater;
+	uint32_t		snd_buf_hiwater;
 	/* Current num bytes in the send socket buffer. */
-	u_int			snd_buf_cc;
+	uint32_t		snd_buf_cc;
 	/* Size of the TCP receive buffer in bytes. */
-	u_int			rcv_buf_hiwater;
+	uint32_t		rcv_buf_hiwater;
 	/* Current num bytes in the receive socket buffer. */
-	u_int			rcv_buf_cc;
+	uint32_t		rcv_buf_cc;
 	/* Number of bytes inflight that we are waiting on ACKs for. */
 	uint32_t		pipe;
 	/* Number of segments currently in the reassembly queue. */
-	int			t_segqlen;
-};
+	int32_t			t_segqlen;
+} __packed;
 
 struct flow_info
 {
@@ -274,6 +275,10 @@ SYSCTL_PROC(_net_inet_siftr2, OID_AUTO, flowid_filter,
     NULL, 0, &siftr_sysctl_flowid_filter_handler, "A",
     "8-hex-digit flowid filter (e.g., 1a2b3c4d or 0x1A2B3C4D)");
 
+static bool siftr_enable_binary_record = 0;
+SYSCTL_BOOL(_net_inet_siftr2, OID_AUTO, enable_binary_record, CTLFLAG_RW,
+    &siftr_enable_binary_record, 0, "enable binary record format");
+
 /* Begin functions. */
 
 static inline struct flow_hash_node *
@@ -337,7 +342,7 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 {
 	struct flow_hash_node *hash_node;
 	struct listhead *counter_list;
-	int ret_sz;
+	size_t ret_sz;
 
 	if (pkt_node->flowid == 0) {
 		panic("%s: flowid not available", __func__);
@@ -390,35 +395,38 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 
 	hash_node->const_info.nrecord++;
 
-	/* Construct a log message.
-	 * cc xxx: check vasprintf()? */
-	ret_sz = sprintf(buf,
-	    "%08x,%c,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x\n",
-	    pkt_node->flowid,
-	    direction[pkt_node->direction],
-	    pkt_node->tval,
-	    pkt_node->snd_cwnd,
-	    pkt_node->snd_ssthresh,
-	    pkt_node->srtt,
-	    pkt_node->data_sz,
-	    pkt_node->snd_wnd,
-	    pkt_node->rcv_wnd,
-	    pkt_node->t_flags,
-	    pkt_node->t_flags2,
-	    pkt_node->rto,
-	    pkt_node->snd_buf_hiwater,
-	    pkt_node->snd_buf_cc,
-	    pkt_node->rcv_buf_hiwater,
-	    pkt_node->rcv_buf_cc,
-	    pkt_node->pipe,
-	    pkt_node->t_segqlen);
+	/* Copy to caller-provided buffer. The caller ensures there is enough
+	 * room (BATCHBUF_SIZE). Return exact bytes written.
+	 */
+	if (siftr_enable_binary_record) {
+		ret_sz = sizeof(*pkt_node);
+		memcpy(buf, pkt_node, ret_sz);
+	} else {
+		ret_sz = sprintf(buf,
+		    "%08x,%c,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x,%x\n",
+		    pkt_node->flowid,
+		    direction[pkt_node->direction],
+		    pkt_node->tval,
+		    pkt_node->snd_cwnd,
+		    pkt_node->snd_ssthresh,
+		    pkt_node->srtt,
+		    pkt_node->data_sz,
+		    pkt_node->snd_wnd,
+		    pkt_node->rcv_wnd,
+		    pkt_node->t_flags,
+		    pkt_node->t_flags2,
+		    pkt_node->rto,
+		    pkt_node->snd_buf_hiwater,
+		    pkt_node->snd_buf_cc,
+		    pkt_node->rcv_buf_hiwater,
+		    pkt_node->rcv_buf_cc,
+		    pkt_node->pipe,
+		    pkt_node->t_segqlen);
 
-	if (ret_sz >= MAX_LOG_MSG_LEN) {
-		panic("%s: record size %d larger than max record size %d",
-		      __func__, ret_sz, MAX_LOG_MSG_LEN);
-	} else if (ret_sz < 0) {
-		panic("%s: an encoding error occurred, return value %d",
-		      __func__, ret_sz);
+		if (ret_sz >= MAX_LOG_MSG_LEN) {
+			panic("%s: record size %zu larger than max record size %d",
+			      __func__, ret_sz, MAX_LOG_MSG_LEN);
+		}
 	}
 
 	return (ret_sz);
@@ -440,7 +448,7 @@ siftr_pkt_manager_thread(void *arg)
 
 		/* Drain all available packets in the ring */
 		while ((pn = buf_ring_dequeue_sc(siftr_br)) != NULL) {
-			linelen = (size_t)siftr_process_pkt(pn, &batchbuf[batchlen]);
+			linelen = siftr_process_pkt(pn, &batchbuf[batchlen]);
 
 			sum = batchlen + linelen;
 			if (sum < PAGE_SIZE) {
@@ -940,9 +948,11 @@ siftr_manage_ops(uint8_t action)
 		/* write log header */
 		sbuf_printf(s,
 		    "enable_time_secs=%jd\tenable_time_usecs=%06ld\t"
-		    "siftrver=%s\tipmode=%u\tsysver=%s\n",
+		    "siftrver=%s\tipmode=%u\trec_fmt=%s\tsysver=%s\n",
 		    (intmax_t)tval.tv_sec, tval.tv_usec,
-		    MODVERSION_STR, SIFTR_IPMODE, verline);
+		    MODVERSION_STR, SIFTR_IPMODE,
+		    siftr_enable_binary_record ? "binary" : "txt",
+		    verline);
 
 		sbuf_finish(s);
 		error = siftr_write_log(curthread, sbuf_data(s), sbuf_len(s));
@@ -986,13 +996,23 @@ siftr_manage_ops(uint8_t action)
 
 		microtime(&tval);
 
-		sbuf_printf(s,
-		    "disable_time_secs=%jd\tdisable_time_usecs=%06ld\t"
-		    "global_flow_cnt=%u\t"
-		    "ring_drops=%u\tmax_str_size=%u\tgen_flowid_cnt=%u\t",
-		    (intmax_t)tval.tv_sec, tval.tv_usec,
-		    global_flow_cnt, siftr_ring_drops, max_str_size,
-		    gen_flowid_cnt);
+		if (siftr_enable_binary_record) {
+			sbuf_printf(s,
+			    "\ndisable_time_secs=%jd\tdisable_time_usecs=%06ld\t"
+			    "global_flow_cnt=%u\t"
+			    "ring_drops=%u\trecord_size=%zu\tgen_flowid_cnt=%u\t",
+			    (intmax_t)tval.tv_sec, tval.tv_usec,
+			    global_flow_cnt, siftr_ring_drops,
+			    sizeof(struct pkt_node), gen_flowid_cnt);
+		} else {
+			sbuf_printf(s,
+			    "disable_time_secs=%jd\tdisable_time_usecs=%06ld\t"
+			    "global_flow_cnt=%u\t"
+			    "ring_drops=%u\tmax_str_size=%u\tgen_flowid_cnt=%u\t",
+			    (intmax_t)tval.tv_sec, tval.tv_usec,
+			    global_flow_cnt, siftr_ring_drops, max_str_size,
+			    gen_flowid_cnt);
+		}
 
 		/* Create an array to store all flows' keys and records. */
 		arr = malloc(sizeof(struct flow_info) * global_flow_cnt,
