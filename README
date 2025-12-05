@@ -15,3 +15,6 @@ net.inet.siftr2.port_filter: 0
 net.inet.siftr2.ppl: 1
 net.inet.siftr2.logfile: /var/log/siftr2.log
 net.inet.siftr2.enabled: 0
+
+recent performance test result:
+https://wiki.freebsd.org/chengcui/testSIFTR2
