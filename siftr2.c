@@ -717,8 +717,8 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		/* drop if full */
 		atomic_add_32(&siftr_ring_drops, 1);
 		free(pn, M_SIFTR_PKTNODE);
-	} else {
-		/* nudge consumer */
+	} else if (buf_ring_count(siftr_br) > (RING_SIZE >> 2)) {
+		/* nudge consumer when the ring buffer is at least 1/4 full */
 		wakeup(&wait_for_pkt);
 	}
 	goto ret;
