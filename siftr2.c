@@ -600,6 +600,12 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	struct listhead *counter_list;
 	struct flow_hash_node *hash_node;
 
+	/* Packets matched by the flowid filter can be inserted into queue. */
+	if (siftr_flowid_filter != 0 &&
+	    (*m)->m_pkthdr.flowid != siftr_flowid_filter) {
+		goto ret;
+	}
+
 	inp_locally_locked = 0;
 	dir = PFIL_DIR(flags);
 
@@ -658,12 +664,6 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	}
 
 	hash_id = siftr_get_flowid(inp, &hash_type);
-
-	/* Packets matched by the flowid filter can be inserted into queue. */
-	if (siftr_flowid_filter != 0 && hash_id != siftr_flowid_filter) {
-		goto inp_unlock;
-	}
-
 	counter_list = counter_hash + (hash_id & siftr_hashmask);
 	hash_node = siftr_find_flow(counter_list, hash_id);
 
