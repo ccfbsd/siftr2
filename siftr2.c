@@ -704,7 +704,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	if (hash_node == NULL) {
 		goto inp_unlock;
 	}
-	pn = malloc(sizeof(struct pkt_node), M_SIFTR_PKTNODE, M_NOWAIT|M_ZERO);
+	pn = malloc(sizeof(struct pkt_node), M_SIFTR_PKTNODE, M_NOWAIT);
 
 	if (pn == NULL) {
 		panic("%s: malloc failed", __func__);
