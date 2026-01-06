@@ -84,6 +84,12 @@
 #include <netinet/in_var.h>
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
+
+#include <netinet/ip6.h>
+#include <netinet6/ip6_var.h>
+#include <netinet6/in6_fib.h>
+#include <netinet6/in6_pcb.h>
+
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_hpts.h>
 #include <netinet/cc/cc.h>
@@ -102,7 +108,7 @@ extern const char version[];  /* Declared in sys/kern/kern_mib.c */
 
 enum {
 	HOOK = 0, UNHOOK = 1, SIFTR_DISABLE = 0, SIFTR_ENABLE = 1,
-	SIFTR_IPMODE = 4, SIFTR_EXPECTED_MAX_TCP_FLOWS = 65536,
+	SIFTR_EXPECTED_MAX_TCP_FLOWS = 65536,
 	SIFTR_LOG_FILE_MODE = 0644, RING_SIZE = 65536,
 	/*
 	 * Hard upper limit on the length of log messages. Bump this up if you
@@ -174,8 +180,8 @@ struct pkt_node {
 struct flow_info
 {
 	/* permanent info */
-	char	laddr[INET_ADDRSTRLEN];		/* local IP address */
-	char	faddr[INET_ADDRSTRLEN];		/* foreign IP address */
+	char	laddr[INET6_ADDRSTRLEN];	/* local IP address */
+	char	faddr[INET6_ADDRSTRLEN];	/* foreign IP address */
 	uint16_t	lport;			/* local TCP port */
 	uint16_t	fport;			/* foreign TCP port */
 	uint32_t	key;			/* flowid of the connection */
@@ -514,6 +520,23 @@ siftr_findinpcb(struct ip *ip, struct mbuf *m, uint16_t sport, uint16_t dport,
 	return (inp);
 }
 
+static inline struct inpcb *
+siftr_findinpcb6(struct ip6_hdr *ip6, struct mbuf *m, uint16_t sport,
+		 uint16_t dport, int dir)
+{
+	struct inpcb *inp;
+
+	if (dir == PFIL_IN)
+		inp = in6_pcblookup_mbuf(&V_tcbinfo, &ip6->ip6_src, sport, &ip6->ip6_dst,
+					 dport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif, m);
+	else
+		inp = in6_pcblookup_mbuf(&V_tcbinfo, &ip6->ip6_dst, dport, &ip6->ip6_src,
+					 sport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif, m);
+
+	/* If we can't find the inpcb, bail. */
+	return (inp);
+}
+
 static inline uint32_t
 siftr_get_flowid(struct inpcb *inp, uint32_t *phashtype)
 {
@@ -528,14 +551,27 @@ siftr_get_flowid(struct inpcb *inp, uint32_t *phashtype)
 	}
 }
 
+static inline uint32_t
+siftr_get_flowid6(struct inpcb *inp, uint32_t *phashtype)
+{
+	if (inp->inp_flowid == 0) {
+		gen_flowid_cnt++;
+		return fib6_calc_packet_hash(&inp->in6p_laddr, &inp->in6p_faddr,
+					     inp->inp_lport, inp->inp_fport,
+					     IPPROTO_TCP, phashtype);
+	} else {
+		*phashtype = inp->inp_flowtype;
+		return inp->inp_flowid;
+	}
+}
+
 static inline void
 siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
-	       int dir, int inp_locally_locked, struct ip *ip,
+	       int dir, int inp_locally_locked, uint32_t payload_sz,
 	       struct flow_hash_node *hash_node)
 {
 	sbintime_t rel_sbt;
 	uint64_t rel_ms;
-	struct tcphdr *th;
 
 	pn->snd_cwnd = tp->snd_cwnd;
 	pn->snd_wnd = tp->snd_wnd;
@@ -564,11 +600,7 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 
 	pn->direction = (dir == PFIL_IN ? DIR_IN : DIR_OUT);
 	pn->flowid = hash_node->const_info.key;
-
-	th = (struct tcphdr *)((caddr_t)ip + (ip->ip_hl << 2));
-//	pn->th_seq = ntohl(th->th_seq);
-//	pn->th_ack = ntohl(th->th_ack);
-	pn->data_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
+	pn->data_sz = payload_sz;
 
 	/* Relative time in milliseconds since SIFTR enable (uint32_t). */
 	rel_sbt = getsbinuptime() - siftr_start_sbt;
@@ -596,7 +628,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	struct tcphdr *th;
 	struct tcpcb *tp;
 	int inp_locally_locked, dir;
-	uint32_t hash_id, hash_type;
+	uint32_t hash_id, hash_type, payload_sz;
 	struct listhead *counter_list;
 	struct flow_hash_node *hash_node;
 
@@ -626,6 +658,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	 * in 4-byte words, so multiply it to get the size in bytes.
 	 */
 	th = (struct tcphdr *)((caddr_t)ip + (ip->ip_hl << 2));
+	payload_sz = ntohs(ip->ip_len) - (ip->ip_hl << 2) - (th->th_off << 2);
 
 	/* Packets matched by the tcp port filter can be inserted into queue. */
 	if ((siftr_flowid_filter == 0 ) && (siftr_port_filter != 0) &&
@@ -711,7 +744,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		goto inp_unlock;
 	}
 
-	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked, ip, hash_node);
+	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked, payload_sz, hash_node);
 
 	if (buf_ring_enqueue(siftr_br, pn) != 0) {
 		/* drop if full */
@@ -731,9 +764,160 @@ ret:
 	return (PFIL_PASS);
 }
 
+static pfil_return_t
+siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
+    void *ruleset __unused, struct inpcb *inp)
+{
+	struct pkt_node *pn;
+	struct ip6_hdr *ip6;
+	struct tcphdr *th;
+	struct tcpcb *tp;
+	int inp_locally_locked, dir;
+	uint32_t hash_id, hash_type, payload_sz;
+	struct listhead *counter_list;
+	struct flow_hash_node *hash_node;
+
+	/* Packets matched by the flowid filter can be inserted into queue. */
+	if (siftr_flowid_filter != 0 &&
+	    (*m)->m_pkthdr.flowid != siftr_flowid_filter) {
+		goto ret6;
+	}
+
+	inp_locally_locked = 0;
+	dir = PFIL_DIR(flags);
+
+	/*
+	 * m_pullup is not required here because ip_{input|output}
+	 * already do the heavy lifting for us.
+	 */
+
+	ip6 = mtod(*m, struct ip6_hdr *);
+
+	/* Only continue processing if the packet is TCP. */
+	if (ip6->ip6_nxt != IPPROTO_TCP)
+		goto ret6;
+
+	/*
+	 * Create a tcphdr struct starting at the correct offset
+	 * in the IP packet.
+	 */
+	th = (struct tcphdr *)((caddr_t)ip6 + sizeof(struct ip6_hdr));
+	payload_sz = ntohs(ip6->ip6_plen) - (th->th_off << 2);
+
+	/* Packets matched by the tcp port filter can be inserted into queue. */
+	if ((siftr_flowid_filter == 0 ) && (siftr_port_filter != 0) &&
+	    (siftr_port_filter != ntohs(th->th_sport)) &&
+	    (siftr_port_filter != ntohs(th->th_dport))) {
+		goto ret6;
+	}
+
+	/*
+	 * If the pfil hooks don't provide a pointer to the
+	 * inpcb, we need to find it ourselves and lock it.
+	 */
+	if (inp == NULL) {
+		/* Find the corresponding inpcb for this pkt. */
+		inp = siftr_findinpcb6(ip6, *m, th->th_sport, th->th_dport, dir);
+
+		if (inp == NULL)
+			goto ret6;
+		else
+			inp_locally_locked = 1;
+	}
+
+	INP_LOCK_ASSERT(inp);
+
+	/* Find the TCP control block that corresponds with this packet */
+	tp = intotcpcb(inp);
+
+	/*
+	 * If we can't find the TCP control block (happens occasionaly for a
+	 * packet sent during the shutdown phase of a TCP connection), or the
+	 * TCP control block has not initialized (happens during TCPS_SYN_SENT),
+	 * bail.
+	 */
+	if (tp == NULL || tp->t_state < TCPS_ESTABLISHED) {
+		goto inp_unlock6;
+	}
+
+	hash_id = siftr_get_flowid6(inp, &hash_type);
+	counter_list = counter_hash + (hash_id & siftr_hashmask);
+	hash_node = siftr_find_flow(counter_list, hash_id);
+
+	/* If this flow hasn't been seen before, we create a new entry. */
+	if (hash_node == NULL) {
+		struct flow_info info;
+
+		ip6_sprintf(info.laddr, &inp->in6p_laddr);
+		ip6_sprintf(info.faddr, &inp->in6p_faddr);
+		info.lport = ntohs(inp->inp_lport);
+		info.fport = ntohs(inp->inp_fport);
+		info.key = hash_id;
+		info.ipver = INP_IPV6;
+		info.flowtype = hash_type;
+
+		/* short hand for stack type check */
+		if (tp->t_fb->tfb_tcp_block_name[0] == 'f') {
+			info.stack_type = FBSD;
+		} else if (tp->t_fb->tfb_tcp_block_name[0] == 'r') {
+			info.stack_type = RACK;
+		}
+		/* short hand for TCP congestion control check */
+		if (CC_ALGO(tp)->name[0] == 'c') {
+			info.tcp_cc = CUBIC;
+		} else if (CC_ALGO(tp)->name[0] == 'n') {
+			info.tcp_cc = NEWRENO;
+		}
+		info.mss = tcp_maxseg(tp);
+		info.sack_enabled = (tp->t_flags & TF_SACK_PERMIT) != 0;
+		info.snd_scale = tp->snd_scale;
+		info.rcv_scale = tp->rcv_scale;
+		info.nrecord = 0;
+		info.ntrans = 0;
+
+		hash_node = siftr_new_hash_node(info);
+	}
+
+	if (hash_node == NULL) {
+		goto inp_unlock6;
+	}
+	pn = malloc(sizeof(struct pkt_node), M_SIFTR_PKTNODE, M_NOWAIT);
+
+	if (pn == NULL) {
+		panic("%s: malloc failed", __func__);
+		goto inp_unlock6;
+	}
+
+	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked, payload_sz, hash_node);
+
+	if (buf_ring_enqueue(siftr_br, pn) != 0) {
+		/* drop if full */
+		atomic_add_32(&siftr_ring_drops, 1);
+		free(pn, M_SIFTR_PKTNODE);
+	} else if (buf_ring_count(siftr_br) > (RING_SIZE >> 2)) {
+		/* nudge consumer when the ring buffer is at least 1/4 full */
+		wakeup(&wait_for_pkt);
+	}
+	goto ret6;
+
+inp_unlock6:
+	if (inp_locally_locked)
+		INP_RUNLOCK(inp);
+
+ret6:
+	return (PFIL_PASS);
+}
+
+/*
+ * pfil(9) context
+ */
 
 VNET_DEFINE_STATIC(pfil_hook_t, siftr_inet_hook);
 #define	V_siftr_inet_hook	VNET(siftr_inet_hook)
+
+VNET_DEFINE_STATIC(pfil_hook_t, siftr_inet6_hook);
+#define V_siftr_inet6_hook	VNET(siftr_inet6_hook)
+
 static int
 siftr_pfil(int action)
 {
@@ -741,7 +925,6 @@ siftr_pfil(int action)
 		.pa_version = PFIL_VERSION,
 		.pa_flags = PFIL_IN | PFIL_OUT,
 		.pa_modname = "siftr2",
-		.pa_rulname = "default",
 	};
 	struct pfil_link_args pla = {
 		.pa_version = PFIL_VERSION,
@@ -757,12 +940,22 @@ siftr_pfil(int action)
 		if (action == HOOK) {
 			pha.pa_mbuf_chk = siftr_chkpkt;
 			pha.pa_type = PFIL_TYPE_IP4;
+			pha.pa_rulname = "inet";
 			V_siftr_inet_hook = pfil_add_hook(&pha);
 			pla.pa_hook = V_siftr_inet_hook;
 			pla.pa_head = V_inet_pfil_head;
 			(void)pfil_link(&pla);
+
+			pha.pa_mbuf_chk = siftr_chkpkt6;
+			pha.pa_type = PFIL_TYPE_IP6;
+			pha.pa_rulname = "inet6";
+			V_siftr_inet6_hook = pfil_add_hook(&pha);
+			pla.pa_hook = V_siftr_inet6_hook;
+			pla.pa_head = V_inet6_pfil_head;
+			(void)pfil_link(&pla);
 		} else if (action == UNHOOK) {
 			pfil_remove_hook(V_siftr_inet_hook);
+			pfil_remove_hook(V_siftr_inet6_hook);
 		}
 		CURVNET_RESTORE();
 	}
@@ -948,10 +1141,9 @@ siftr_manage_ops(uint8_t action)
 		/* write log header */
 		sbuf_printf(s,
 		    "enable_time_secs=%jd\tenable_time_usecs=%06ld\t"
-		    "siftrver=%s\tipmode=%u\trec_fmt=%s\tsysver=%s\n",
+		    "siftrver=%s\trec_fmt=%s\tsysver=%s\n",
 		    (intmax_t)tval.tv_sec, tval.tv_usec,
-		    MODVERSION_STR, SIFTR_IPMODE,
-		    siftr_enable_binary_record ? "binary" : "txt",
+		    MODVERSION_STR, siftr_enable_binary_record ? "binary" : "txt",
 		    verline);
 
 		sbuf_finish(s);
