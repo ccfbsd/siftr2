@@ -1235,8 +1235,8 @@ siftr_manage_ops(uint8_t action)
 		qsort(arr, global_flow_cnt, sizeof(arr[0]), compare_nrecord);
 		sbuf_printf(s, "flow_list=");
 		for (j = 0; j < global_flow_cnt; j++) {
-			sbuf_printf(s, "%08x,%s,%hu,%s,%hu,%d,%d,%u,%u,%u,%u,%u,%u;",
-					arr[j].key,
+			sbuf_printf(s, "%08x,%d,%s,%hu,%s,%hu,%d,%d,%u,%u,%u,%u,%u,%u;",
+					arr[j].key, arr[j].ipver == INP_IPV4 ? 4 : 6,
 					arr[j].laddr, arr[j].lport,
 					arr[j].faddr, arr[j].fport,
 					arr[j].stack_type, arr[j].tcp_cc,
