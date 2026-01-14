@@ -48,18 +48,13 @@
 #include <sys/eventhandler.h>
 #include <sys/fcntl.h>
 #include <sys/file.h>
-#include <sys/hash.h>
 #include <sys/kernel.h>
 #include <sys/kthread.h>
-#include <sys/lock.h>
 #include <sys/mbuf.h>
 #include <sys/module.h>
 #include <sys/mutex.h>
-#include <sys/proc.h>
 #include <sys/reboot.h>
 #include <sys/sbuf.h>
-#include <sys/sdt.h>
-#include <sys/smp.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
 #include <sys/syscallsubr.h>
@@ -68,27 +63,23 @@
 #include <sys/unistd.h>
 #include <sys/vnode.h>
 
-#include <machine/atomic.h>
 #include <machine/in_cksum.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/pfil.h>
-#include <net/route.h>
 
 #include <netinet/in.h>
-#include <netinet/in_kdtrace.h>
 #include <netinet/in_fib.h>
 #include <netinet/in_pcb.h>
-#include <netinet/in_systm.h>
 #include <netinet/in_var.h>
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
 
 #include <netinet/ip6.h>
-#include <netinet6/ip6_var.h>
 #include <netinet6/in6_fib.h>
 #include <netinet6/in6_pcb.h>
+#include <netinet6/ip6_var.h>
 
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_hpts.h>
