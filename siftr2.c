@@ -184,10 +184,13 @@ struct flow_info
 		FBSD = 0,
 		RACK = 1,
 	}		stack_type;		/* net stack name: freebsd or rack */
+	/* TCP stack name: freebsd or rack */
+	char	tcp_stack_name[TCP_FUNCTION_NAME_LEN_MAX];
 	enum {
 		CUBIC = 0,
 		NEWRENO = 1,
 	}		tcp_cc;			/* TCP congestion control name */
+	char	tcp_cc_name[TCP_CA_NAME_MAX];	/* TCP congestion control name */
 	uint32_t	mss;			/* Max Segment Size (bytes). */
 	u_char		sack_enabled;		/* Is SACK enabled? */
 	u_char		snd_scale;		/* Window scaling for snd window. */
@@ -706,12 +709,15 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		} else if (tp->t_fb->tfb_tcp_block_name[0] == 'r') {
 			info.stack_type = RACK;
 		}
+		strlcpy(info.tcp_stack_name, tp->t_fb->tfb_tcp_block_name,
+			TCP_FUNCTION_NAME_LEN_MAX);
 		/* short hand for TCP congestion control check */
 		if (CC_ALGO(tp)->name[0] == 'c') {
 			info.tcp_cc = CUBIC;
 		} else if (CC_ALGO(tp)->name[0] == 'n') {
 			info.tcp_cc = NEWRENO;
 		}
+		strlcpy(info.tcp_cc_name, CC_ALGO(tp)->name, TCP_CA_NAME_MAX);
 		info.mss = tcp_maxseg(tp);
 		info.sack_enabled = (tp->t_flags & TF_SACK_PERMIT) != 0;
 		info.snd_scale = tp->snd_scale;
@@ -850,12 +856,15 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 		} else if (tp->t_fb->tfb_tcp_block_name[0] == 'r') {
 			info.stack_type = RACK;
 		}
+		strlcpy(info.tcp_stack_name, tp->t_fb->tfb_tcp_block_name,
+			TCP_FUNCTION_NAME_LEN_MAX);
 		/* short hand for TCP congestion control check */
 		if (CC_ALGO(tp)->name[0] == 'c') {
 			info.tcp_cc = CUBIC;
 		} else if (CC_ALGO(tp)->name[0] == 'n') {
 			info.tcp_cc = NEWRENO;
 		}
+		strlcpy(info.tcp_cc_name, CC_ALGO(tp)->name, TCP_CA_NAME_MAX);
 		info.mss = tcp_maxseg(tp);
 		info.sack_enabled = (tp->t_flags & TF_SACK_PERMIT) != 0;
 		info.snd_scale = tp->snd_scale;
@@ -1223,11 +1232,11 @@ siftr_manage_ops(uint8_t action)
 		qsort(arr, global_flow_cnt, sizeof(arr[0]), compare_nrecord);
 		sbuf_printf(s, "flow_list=");
 		for (j = 0; j < global_flow_cnt; j++) {
-			sbuf_printf(s, "%08x,%d,%s,%hu,%s,%hu,%d,%d,%u,%u,%u,%u,%u,%u;",
+			sbuf_printf(s, "%08x,%d,%s,%hu,%s,%hu,%s,%s,%u,%u,%u,%u,%u,%u;",
 					arr[j].key, arr[j].ipver == INP_IPV4 ? 4 : 6,
 					arr[j].laddr, arr[j].lport,
 					arr[j].faddr, arr[j].fport,
-					arr[j].stack_type, arr[j].tcp_cc,
+					arr[j].tcp_stack_name, arr[j].tcp_cc_name,
 					arr[j].mss, arr[j].sack_enabled,
 					arr[j].snd_scale, arr[j].rcv_scale,
 					arr[j].nrecord, arr[j].ntrans);
