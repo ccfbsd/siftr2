@@ -497,9 +497,6 @@ siftr_findinpcb(struct ip *ip, struct mbuf *m, uint16_t sport, uint16_t dport,
 {
 	struct inpcb *inp;
 
-	/* We need the tcbinfo lock. */
-	INP_INFO_WUNLOCK_ASSERT(&V_tcbinfo);
-
 	if (dir == PFIL_IN)
 		inp = in_pcblookup_mbuf(&V_tcbinfo, ip->ip_src, sport, ip->ip_dst,
 					dport, INPLOOKUP_RLOCKPCB, m->m_pkthdr.rcvif, m);
