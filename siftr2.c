@@ -186,10 +186,6 @@ struct flow_info
 	}		stack_type;		/* net stack name: freebsd or rack */
 	/* TCP stack name: freebsd or rack */
 	char	tcp_stack_name[TCP_FUNCTION_NAME_LEN_MAX];
-	enum {
-		CUBIC = 0,
-		NEWRENO = 1,
-	}		tcp_cc;			/* TCP congestion control name */
 	char	tcp_cc_name[TCP_CA_NAME_MAX];	/* TCP congestion control name */
 	uint32_t	mss;			/* Max Segment Size (bytes). */
 	u_char		sack_enabled;		/* Is SACK enabled? */
@@ -711,12 +707,6 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 		}
 		strlcpy(info.tcp_stack_name, tp->t_fb->tfb_tcp_block_name,
 			TCP_FUNCTION_NAME_LEN_MAX);
-		/* short hand for TCP congestion control check */
-		if (CC_ALGO(tp)->name[0] == 'c') {
-			info.tcp_cc = CUBIC;
-		} else if (CC_ALGO(tp)->name[0] == 'n') {
-			info.tcp_cc = NEWRENO;
-		}
 		strlcpy(info.tcp_cc_name, CC_ALGO(tp)->name, TCP_CA_NAME_MAX);
 		info.mss = tcp_maxseg(tp);
 		info.sack_enabled = (tp->t_flags & TF_SACK_PERMIT) != 0;
@@ -858,12 +848,6 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 		}
 		strlcpy(info.tcp_stack_name, tp->t_fb->tfb_tcp_block_name,
 			TCP_FUNCTION_NAME_LEN_MAX);
-		/* short hand for TCP congestion control check */
-		if (CC_ALGO(tp)->name[0] == 'c') {
-			info.tcp_cc = CUBIC;
-		} else if (CC_ALGO(tp)->name[0] == 'n') {
-			info.tcp_cc = NEWRENO;
-		}
 		strlcpy(info.tcp_cc_name, CC_ALGO(tp)->name, TCP_CA_NAME_MAX);
 		info.mss = tcp_maxseg(tp);
 		info.sack_enabled = (tp->t_flags & TF_SACK_PERMIT) != 0;
