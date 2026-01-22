@@ -328,7 +328,6 @@ siftr_new_hash_node(struct flow_info info)
 		global_flow_cnt++;
 		return hash_node;
 	} else {
-		panic("%s: malloc failed", __func__);
 		return NULL;
 	}
 }
@@ -340,16 +339,8 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 	struct listhead *counter_list;
 	size_t ret_sz;
 
-	if (pkt_node->flowid == 0) {
-		panic("%s: flowid not available", __func__);
-	}
-
 	counter_list = counter_hash + (pkt_node->flowid & siftr_hashmask);
 	hash_node = siftr_find_flow(counter_list, pkt_node->flowid);
-
-	if (hash_node == NULL) {
-		panic("%s: hash_node == NULL", __func__);
-	}
 
 	hash_node->const_info.ntrans++;
 
@@ -418,11 +409,6 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 		    pkt_node->rcv_buf_cc,
 		    pkt_node->pipe,
 		    pkt_node->t_segqlen);
-
-		if (ret_sz >= MAX_LOG_MSG_LEN) {
-			panic("%s: record size %zu larger than max record size %d",
-			      __func__, ret_sz, MAX_LOG_MSG_LEN);
-		}
 	}
 
 	return (ret_sz);
@@ -724,7 +710,6 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	pn = malloc(sizeof(struct pkt_node), M_SIFTR_PKTNODE, M_NOWAIT);
 
 	if (pn == NULL) {
-		panic("%s: malloc failed", __func__);
 		goto inp_unlock;
 	}
 
@@ -865,7 +850,6 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 	pn = malloc(sizeof(struct pkt_node), M_SIFTR_PKTNODE, M_NOWAIT);
 
 	if (pn == NULL) {
-		panic("%s: malloc failed", __func__);
 		goto inp_unlock6;
 	}
 
@@ -1191,9 +1175,6 @@ siftr_manage_ops(uint8_t action)
 		arr = malloc(sizeof(struct flow_info) * global_flow_cnt,
 			     M_SIFTR_FLOW_INFO, M_NOWAIT|M_ZERO);
 
-		if (arr == NULL) {
-			panic("%s: malloc failed for an array of flows", __func__);
-		}
 		/*
 		 * Iterate over the flow hash, printing a summary of each
 		 * flowid seen and freeing any malloc'd memory.
@@ -1206,10 +1187,6 @@ siftr_manage_ops(uint8_t action)
 				free(counter, M_SIFTR_HASHNODE);
 			}
 			LIST_INIT(counter_hash + i);
-		}
-
-		if (j > global_flow_cnt) {
-			panic("%s: arr[%d] overflow", __func__, j);
 		}
 
 		/* sort into ascending ordered list by flow's nrecord */
