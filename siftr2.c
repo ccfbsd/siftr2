@@ -121,7 +121,6 @@ _Static_assert(RING_SIZE != 0 && ((RING_SIZE & (RING_SIZE - 1)) == 0),
     "RING_SIZE must be a power of two");
 
 static MALLOC_DEFINE(M_SIFTR, "siftr2", "ring buffer used by SIFTR2");
-static MALLOC_DEFINE(M_SIFTR_PKTNODE, "siftr2_pktnode", "SIFTR2 pkt_node struct");
 static MALLOC_DEFINE(M_SIFTR_FLOW_INFO, "siftr2_flow_info", "SIFTR2 flow_info struct");
 static MALLOC_DEFINE(M_SIFTR_HASHNODE, "siftr2_hashnode", "SIFTR2 flow_hash_node struct");
 
@@ -208,6 +207,9 @@ struct flow_hash_node
 static struct buf_ring *siftr_br = NULL;
 static struct vnode *siftr_vnode = NULL;
 static struct ucred *siftr_vnode_cred = NULL;
+
+static struct pkt_node pkt_pool[RING_SIZE];
+static uint32_t pkt_pool_write_idx = 0; /* producer write index for pkt_pool */
 
 static uint32_t siftr_ring_drops = 0;	/* producer drops when full */
 static uint32_t max_str_size = 0;
@@ -414,6 +416,10 @@ siftr_process_pkt(struct pkt_node * pkt_node, char buf[])
 	return (ret_sz);
 }
 
+static inline uint32_t ptr_to_idx(void *p) {
+	return (uint32_t)(uintptr_t)p;
+}
+
 static void
 siftr_pkt_manager_thread(void *arg)
 {
@@ -421,6 +427,7 @@ siftr_pkt_manager_thread(void *arg)
 	uint8_t draining = 2;
 	char batchbuf[BATCHBUF_SIZE];
 	size_t linelen, sum, batchlen = 0;
+	void *val;
 
 	mtx_lock(&siftr_pkt_mgr_mtx);
 	while (draining) {
@@ -428,8 +435,9 @@ siftr_pkt_manager_thread(void *arg)
 		mtx_sleep(&wait_for_pkt, &siftr_pkt_mgr_mtx, PWAIT, "pktwait", 1);
 		mtx_unlock(&siftr_pkt_mgr_mtx);
 
-		/* Drain all available packets in the ring */
-		while ((pn = buf_ring_dequeue_sc(siftr_br)) != NULL) {
+		/* Drain all indexed packets, which are provided by the ring. */
+		while ((val = buf_ring_dequeue_sc(siftr_br)) != NULL) {
+			pn = &pkt_pool[ptr_to_idx(val)];
 			linelen = siftr_process_pkt(pn, &batchbuf[batchlen]);
 
 			sum = batchlen + linelen;
@@ -455,7 +463,6 @@ siftr_pkt_manager_thread(void *arg)
 			if (max_str_size < linelen) {
 				max_str_size = linelen;
 			}
-			free(pn, M_SIFTR_PKTNODE);
 		}
 
 		/* Flush any accumulated batch if idle */
@@ -584,6 +591,10 @@ siftr_siftdata(struct pkt_node *pn, struct inpcb *inp, struct tcpcb *tp,
 	pn->tval = (uint32_t)rel_ms;
 }
 
+static inline void *idx_to_ptr(uint32_t idx) {
+	return (void *)(uintptr_t)idx;
+}
+
 /*
  * pfil hook that is called for each IPv4 packet making its way through the
  * stack in either direction.
@@ -601,7 +612,7 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	struct tcphdr *th;
 	struct tcpcb *tp;
 	int inp_locally_locked, dir;
-	uint32_t hash_id, hash_type, payload_sz;
+	uint32_t hash_id, hash_type, payload_sz, idx;
 	struct listhead *counter_list;
 	struct flow_hash_node *hash_node;
 
@@ -707,21 +718,21 @@ siftr_chkpkt(struct mbuf **m, struct ifnet *ifp, int flags,
 	if (hash_node == NULL) {
 		goto inp_unlock;
 	}
-	pn = malloc(sizeof(struct pkt_node), M_SIFTR_PKTNODE, M_NOWAIT);
-
-	if (pn == NULL) {
-		goto inp_unlock;
-	}
+	/* each producer gets a unique index via atomic operation*/
+	idx = atomic_fetchadd_32(&pkt_pool_write_idx, 1) & (RING_SIZE - 1);
+	pn = &pkt_pool[idx];
 
 	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked, payload_sz, hash_node);
 
-	if (buf_ring_enqueue(siftr_br, pn) != 0) {
+	if (buf_ring_enqueue(siftr_br, idx_to_ptr(idx)) != 0) {
 		/* drop if full */
 		atomic_add_32(&siftr_ring_drops, 1);
-		free(pn, M_SIFTR_PKTNODE);
-	} else if (buf_ring_count(siftr_br) > (RING_SIZE >> 2)) {
-		/* nudge consumer when the ring buffer is at least 1/4 full */
-		wakeup(&wait_for_pkt);
+	} else {
+		/* advance write index only on successful enqueue */
+		if (buf_ring_count(siftr_br) > (RING_SIZE >> 2)) {
+			/* nudge consumer when the ring buffer is at least 1/4 full */
+			wakeup(&wait_for_pkt);
+		}
 	}
 	goto ret;
 
@@ -742,7 +753,7 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 	struct tcphdr *th;
 	struct tcpcb *tp;
 	int inp_locally_locked, dir;
-	uint32_t hash_id, hash_type, payload_sz;
+	uint32_t hash_id, hash_type, payload_sz, idx;
 	struct listhead *counter_list;
 	struct flow_hash_node *hash_node;
 
@@ -847,21 +858,21 @@ siftr_chkpkt6(struct mbuf **m, struct ifnet *ifp, int flags,
 	if (hash_node == NULL) {
 		goto inp_unlock6;
 	}
-	pn = malloc(sizeof(struct pkt_node), M_SIFTR_PKTNODE, M_NOWAIT);
-
-	if (pn == NULL) {
-		goto inp_unlock6;
-	}
+	/* each producer gets a unique index via atomic operation */
+	idx = atomic_fetchadd_32(&pkt_pool_write_idx, 1) & (RING_SIZE - 1);
+	pn = &pkt_pool[idx];
 
 	siftr_siftdata(pn, inp, tp, dir, inp_locally_locked, payload_sz, hash_node);
 
-	if (buf_ring_enqueue(siftr_br, pn) != 0) {
+	if (buf_ring_enqueue(siftr_br, idx_to_ptr(idx)) != 0) {
 		/* drop if full */
 		atomic_add_32(&siftr_ring_drops, 1);
-		free(pn, M_SIFTR_PKTNODE);
-	} else if (buf_ring_count(siftr_br) > (RING_SIZE >> 2)) {
-		/* nudge consumer when the ring buffer is at least 1/4 full */
-		wakeup(&wait_for_pkt);
+	} else {
+		/* advance write index only on successful enqueue */
+		if (buf_ring_count(siftr_br) > (RING_SIZE >> 2)) {
+			/* nudge consumer when the ring buffer is at least 1/4 full */
+			wakeup(&wait_for_pkt);
+		}
 	}
 	goto ret6;
 
@@ -1115,7 +1126,8 @@ siftr_manage_ops(uint8_t action)
 		error = siftr_write_log(curthread, sbuf_data(s), sbuf_len(s));
 
 		siftr_exit_pkt_manager_thread = 0;
-		global_flow_cnt = siftr_ring_drops = max_str_size = gen_flowid_cnt = 0;
+		global_flow_cnt = siftr_ring_drops = max_str_size = 0;
+		gen_flowid_cnt = pkt_pool_write_idx = 0;
 
 		kthread_add(&siftr_pkt_manager_thread, NULL, NULL,
 		    &siftr_pkt_manager_thr, RFNOWAIT, 0,
@@ -1208,7 +1220,8 @@ siftr_manage_ops(uint8_t action)
 
 		error = siftr_write_log(curthread, sbuf_data(s), sbuf_len(s));
 
-		global_flow_cnt = siftr_ring_drops = max_str_size = gen_flowid_cnt = 0;
+		global_flow_cnt = siftr_ring_drops = max_str_size = 0;
+		gen_flowid_cnt = pkt_pool_write_idx = 0;
 		free(arr, M_SIFTR_FLOW_INFO);
 
 		/* destroy ring */
