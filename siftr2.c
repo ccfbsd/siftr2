@@ -327,7 +327,7 @@ siftr_new_hash_node(struct flow_info info)
 		hash_node->last_cwnd = 0;
 		hash_node->const_info = info;
 		LIST_INSERT_HEAD(counter_list, hash_node, nodes);
-		global_flow_cnt++;
+		atomic_add_32(&global_flow_cnt, 1);
 		return hash_node;
 	} else {
 		panic("%s: malloc failed", __func__);
